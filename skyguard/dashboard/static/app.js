@@ -1159,8 +1159,232 @@ function flyToStation(id) {
   }
 }
 
+function getConfidencePillInfo(confVal, cls) {
+  if (confVal == null) return { text: 'Awaiting Step', pillCls: 'warn', fillCls: 'fill-warn' };
+  const pctStr = (confVal * 100).toFixed(1) + '%';
+  if (cls === 'STATION_SENSOR_FAULT') {
+    return { text: `FAULT DETECTED (${pctStr})`, pillCls: 'fault', fillCls: 'fill-fault' };
+  }
+  if (cls === 'GENUINE_METEOROLOGICAL_EVENT') {
+    return { text: `MET EVENT (${pctStr})`, pillCls: 'met', fillCls: 'fill-met' };
+  }
+  if (cls === 'UNCERTAIN_INSUFFICIENT_EVIDENCE') {
+    return { text: `UNCERTAIN (${pctStr})`, pillCls: 'warn', fillCls: 'fill-warn' };
+  }
+  if (confVal >= 0.92) {
+    return { text: `HIGH CONFIDENCE (${pctStr})`, pillCls: 'high', fillCls: 'fill-normal' };
+  }
+  if (confVal >= 0.80) {
+    return { text: `MODERATE (${pctStr})`, pillCls: 'med', fillCls: 'fill-normal' };
+  }
+  return { text: `NOMINAL (${pctStr})`, pillCls: 'med', fillCls: 'fill-normal' };
+}
+
+/* ── PATCH VERDICT PANEL (surgical in-place update, fires CSS transitions) ── */
+function patchVerdictPanel(dec, cls, obs) {
+  const ringR    = 15;
+  const ringCirc = +(2 * Math.PI * ringR).toFixed(2); // 94.25
+
+  const confVal    = dec.confidence != null ? dec.confidence : null;
+  const confPctStr = confVal != null ? (confVal * 100).toFixed(1) + '%' : '—';
+  const confWidth  = confVal != null ? Math.min(100, Math.max(0, confVal * 100)).toFixed(1) + '%' : '0%';
+  const confOffset = confVal != null ? (ringCirc * (1 - confVal)).toFixed(2) : ringCirc;
+  const severity   = dec.severity   || null;
+  const faultType  = dec.fault_archetype || null;
+  const explanation= dec.summary_explanation || null;
+
+  const ringCls = cls === 'STATION_SENSOR_FAULT' ? 'fault'
+                : cls === 'GENUINE_METEOROLOGICAL_EVENT' ? 'met'
+                : cls === 'UNCERTAIN_INSUFFICIENT_EVIDENCE' ? 'warn' : 'normal';
+
+  // Flash animation class keyed to classification
+  const flashCls = cls === 'STATION_SENSOR_FAULT'              ? 'verdict-changed-fault'
+                 : cls === 'UNCERTAIN_INSUFFICIENT_EVIDENCE'   ? 'verdict-changed-warn'
+                 : 'verdict-changed';
+
+  function flashEl(el) {
+    if (!el) return;
+    el.classList.remove('verdict-changed','verdict-changed-warn','verdict-changed-fault');
+    void el.offsetWidth;
+    el.classList.add(flashCls);
+  }
+
+  // ── Switch-over Banner Tracking ──────────────────────────────
+  const banner = document.getElementById('insp-switch-banner');
+  const bannerMsg = document.getElementById('insp-switch-msg');
+  if (banner && bannerMsg) {
+    if (STATE._lastCls && STATE._lastCls !== cls) {
+      const fromLabel = STATE._lastCls.replace(/_/g, ' ');
+      const toLabel   = cls.replace(/_/g, ' ');
+      const diffConf  = (STATE._lastConf != null && confVal != null) ? ((confVal - STATE._lastConf) * 100).toFixed(1) : null;
+      const diffStr   = diffConf != null ? ` (ΔConf: ${Number(diffConf) > 0 ? '+' : ''}${diffConf}%)` : '';
+      bannerMsg.textContent = `VERDICT SWITCH: ${fromLabel} → ${toLabel}${diffStr}`;
+      banner.className = `insp-switch-banner ${cls === 'STATION_SENSOR_FAULT' ? 'to-fault' : cls === 'GENUINE_METEOROLOGICAL_EVENT' ? 'to-met' : 'to-normal'}`;
+      banner.style.display = 'flex';
+      flashEl(banner);
+    }
+  }
+  STATE._lastCls  = cls;
+  STATE._lastConf = confVal;
+
+  // ── Classification chip ──────────────────────────────────────
+  const chip = document.getElementById('insp-cls-chip');
+  if (chip) {
+    const newLabel = cls.replace(/_/g, ' ');
+    const changed  = chip.textContent !== newLabel;
+    chip.textContent = newLabel;
+    chip.className   = `sg-status-chip ${cls}`;
+    if (changed) flashEl(chip);
+  }
+
+  // ── Confidence ring arc ──────────────────────────────────────
+  const ringFg = document.getElementById('insp-conf-ring-fg');
+  if (ringFg) {
+    ringFg.setAttribute('stroke-dashoffset', confOffset);
+    ringFg.className.baseVal = `fg ${ringCls}`;
+  }
+
+  // ── Confidence number ────────────────────────────────────────
+  const confBadge = document.getElementById('insp-conf-badge');
+  const confValEl = document.getElementById('insp-conf-val');
+  if (confValEl) {
+    if (confValEl.textContent !== confPctStr) {
+      confValEl.textContent = confPctStr;
+      if (confBadge) flashEl(confBadge);
+    }
+  }
+
+  // ── Dynamic Confidence Meter (Bar + Pill) ────────────────────
+  const pillInfo = getConfidencePillInfo(confVal, cls);
+  const pillEl = document.getElementById('insp-conf-pill');
+  if (pillEl) {
+    pillEl.textContent = pillInfo.text;
+    pillEl.className   = `insp-conf-pill ${pillInfo.pillCls}`;
+  }
+  const fillEl = document.getElementById('insp-conf-fill');
+  if (fillEl) {
+    fillEl.style.width = confWidth;
+    fillEl.className   = `insp-conf-fill ${pillInfo.fillCls}`;
+  }
+
+  // ── Severity row ─────────────────────────────────────────────
+  const sevRow = document.getElementById('insp-severity-row');
+  const sevVal = document.getElementById('insp-severity-val');
+  if (sevRow) {
+    if (severity) {
+      sevRow.style.display = '';
+      if (sevVal && sevVal.textContent !== severity) {
+        sevVal.textContent = severity;
+        sevVal.className   = `val ${severity.toLowerCase()}`;
+        flashEl(sevVal);
+      }
+    } else {
+      sevRow.style.display = 'none';
+    }
+  }
+
+  // ── Fault archetype row ──────────────────────────────────────
+  const faultRow = document.getElementById('insp-fault-row');
+  const faultVal = document.getElementById('insp-fault-val');
+  if (faultRow) {
+    if (faultType && faultType !== 'NONE') {
+      faultRow.style.display = '';
+      if (faultVal && faultVal.textContent !== faultType) {
+        faultVal.textContent = faultType;
+        flashEl(faultVal);
+      }
+    } else {
+      faultRow.style.display = 'none';
+    }
+  }
+
+  // ── Explanation text ─────────────────────────────────────────
+  const expEl = document.getElementById('insp-explanation');
+  if (expEl) {
+    if (explanation) {
+      expEl.style.display = '';
+      if (expEl.textContent !== explanation) {
+        expEl.textContent = explanation;
+        flashEl(expEl);
+      }
+    } else {
+      expEl.style.display = 'none';
+    }
+  }
+
+  // ── Score bars (CSS width transition fires automatically) ────
+  function patchBar(barId, valId, score) {
+    const bar = document.getElementById(barId);
+    const val = document.getElementById(valId);
+    if (!bar || !val) return;
+    const pct     = Math.min(100, Math.max(0, (score||0) * 100)).toFixed(1) + '%';
+    const numText = (score||0).toFixed(2);
+    if (bar.style.width !== pct) {
+      bar.style.width = pct;
+      bar.className   = `sg-score-bar ${getScoreBarClass(score)}`;
+    }
+    if (val.textContent !== numText) {
+      val.textContent = numText;
+      flashEl(val);
+    }
+  }
+
+  patchBar('insp-bar-ch1', 'insp-val-ch1', dec.temporal_score);
+  patchBar('insp-bar-ch2', 'insp-val-ch2', dec.physics_score);
+  patchBar('insp-bar-ch3', 'insp-val-ch3', dec.dacm_connectivity);
+
+  // ── Live Readings patch (dynamic, in-place, no full re-render) ─
+  if (obs) {
+    const spdNew = obs.wind_speed != null ? parseFloat(obs.wind_speed) : null;
+    const bftNew = spdNew == null ? '—'
+                : spdNew < 0.3 ? 'Calm'
+                : spdNew < 1.6 ? 'Light Air'
+                : spdNew < 3.4 ? 'Light Breeze'
+                : spdNew < 5.5 ? 'Gentle Breeze'
+                : spdNew < 8.0 ? 'Moderate'
+                : spdNew < 10.8 ? 'Fresh'
+                : spdNew < 13.9 ? 'Strong' : 'Gale+';
+    const windDirNew = obs.wind_direction != null
+                      ? `${bearingToCardinal(obs.wind_direction)} ${Math.round(obs.wind_direction)}°`
+                      : '—';
+
+    const newTempHtml  = obs.temperature  != null ? `${parseFloat(obs.temperature).toFixed(1)}<span class="unit">°C</span>`   : '<span class="null">—</span>';
+    const newPressHtml = obs.pressure     != null ? `${parseFloat(obs.pressure).toFixed(1)}<span class="unit">hPa</span>`      : '<span class="null">—</span>';
+    const newRhHtml    = obs.humidity     != null ? `${parseFloat(obs.humidity).toFixed(0)}<span class="unit">%</span>`         : '<span class="null">—</span>';
+    const newWindHtml  = spdNew           != null ? `${spdNew.toFixed(1)}<span class="unit">m/s</span>`                        : '<span class="null">—</span>';
+    const newWindSub   = spdNew           != null ? `${bftNew} · ${windDirNew}` : '—';
+
+    function patchRead(elId, newHtml) {
+      const el = document.getElementById(elId);
+      if (!el) return;
+      if (el.innerHTML !== newHtml) {
+        el.innerHTML = newHtml;
+        flashEl(el);
+      }
+    }
+    patchRead('insp-read-temp',  newTempHtml);
+    patchRead('insp-read-rh',    newRhHtml);
+    patchRead('insp-read-press', newPressHtml);
+    patchRead('insp-read-wind',  newWindHtml);
+
+    const windSubEl = document.getElementById('insp-read-wind-sub');
+    if (windSubEl && windSubEl.textContent !== newWindSub) {
+      windSubEl.textContent = newWindSub;
+    }
+
+    // Update LIVE / Awaiting indicator
+    const liveEl = document.getElementById('insp-live-indicator');
+    if (liveEl) {
+      const hasData = obs.temperature != null;
+      liveEl.className   = hasData ? 'insp-live-indicator' : 'insp-dim-indicator';
+      liveEl.textContent = hasData ? '● LIVE' : '(Awaiting Step)';
+    }
+  }
+}
+
 /* ── DYNAMIC STATION INSPECTOR ─────────────────────────────── */
 function updateInspector(station) {
+
   if (!station) {
     const emptyHtml = `
       <div class="sg-inspector-empty">
@@ -1230,42 +1454,85 @@ function updateInspector(station) {
     <div class="sg-inspector-section">
       <div class="section-title">
         <span><i class="fa-solid fa-gauge-high"></i> Live Readings</span>
-        ${readings.temperature != null ? '<span class="insp-live-indicator">● LIVE</span>' : '<span class="insp-dim-indicator">(Awaiting Step)</span>'}
+        <span id="insp-live-indicator" class="${readings.temperature != null ? 'insp-live-indicator' : 'insp-dim-indicator'}">${readings.temperature != null ? '● LIVE' : '(Awaiting Step)'}</span>
       </div>
       <div class="insp-grid">
         <div class="insp-cell">
           <div class="insp-cell-label"><i class="fa-solid fa-temperature-half"></i> Temperature</div>
-          <div class="insp-cell-val">${tempStr}</div>
+          <div class="insp-cell-val" id="insp-read-temp">${tempStr}</div>
         </div>
         <div class="insp-cell">
           <div class="insp-cell-label"><i class="fa-solid fa-droplet"></i> Rel. Humidity</div>
-          <div class="insp-cell-val">${rhStr}</div>
+          <div class="insp-cell-val" id="insp-read-rh">${rhStr}</div>
         </div>
         <div class="insp-cell">
           <div class="insp-cell-label"><i class="fa-solid fa-cloud-arrow-down"></i> Pressure</div>
-          <div class="insp-cell-val">${pressStr}</div>
+          <div class="insp-cell-val" id="insp-read-press">${pressStr}</div>
         </div>
         <div class="insp-cell">
           <div class="insp-cell-label"><i class="fa-solid fa-wind"></i> Wind Speed</div>
-          <div class="insp-cell-val">${windStr}</div>
-          <div class="insp-cell-sub">${spd != null ? `${bft} · ${windDir}` : '—'}</div>
+          <div class="insp-cell-val" id="insp-read-wind">${windStr}</div>
+          <div class="insp-cell-sub" id="insp-read-wind-sub">${spd != null ? `${bft} · ${windDir}` : '—'}</div>
         </div>
       </div>
     </div>
   `;
 
   // 2. Anomaly Decision & AI Quality Verdict
+  const ringR = 15, ringCirc = +(2 * Math.PI * ringR).toFixed(2);  // 94.25
+  const confVal = dec.confidence != null ? dec.confidence : null;
+  const confPctStr = confVal != null ? (confVal * 100).toFixed(1) + '%' : '—';
+  const confWidth  = confVal != null ? Math.min(100, Math.max(0, confVal * 100)).toFixed(1) + '%' : '0%';
+  const confOffset = confVal != null ? (ringCirc * (1 - confVal)).toFixed(2) : ringCirc;
+  const ringCls   = cls === 'STATION_SENSOR_FAULT' ? 'fault'
+                  : cls === 'GENUINE_METEOROLOGICAL_EVENT' ? 'met'
+                  : cls === 'UNCERTAIN_INSUFFICIENT_EVIDENCE' ? 'warn' : 'normal';
+  const pillInfo  = getConfidencePillInfo(confVal, cls);
+
   html += `
-    <div class="sg-inspector-section">
+    <div class="sg-inspector-section" id="insp-verdict-section">
       <div class="section-title"><span><i class="fa-solid fa-brain"></i> AI Quality Verdict</span></div>
       <div class="insp-verdict-card">
         <div class="insp-verdict-header">
-          <span class="sg-status-chip ${cls}">${cls.replace(/_/g, ' ')}</span>
-          ${confidence ? `<span class="insp-conf-badge">Conf: <b>${confidence}</b></span>` : ''}
+          <span class="sg-status-chip ${cls}" id="insp-cls-chip">${cls.replace(/_/g, ' ')}</span>
+          <div class="insp-conf-ring-wrap">
+            <svg class="insp-conf-ring" viewBox="0 0 36 36">
+              <circle class="bg" cx="18" cy="18" r="${ringR}" stroke-dasharray="${ringCirc}" stroke-dashoffset="0"/>
+              <circle class="fg ${ringCls}" id="insp-conf-ring-fg" cx="18" cy="18" r="${ringR}"
+                stroke-dasharray="${ringCirc}" stroke-dashoffset="${confOffset}"/>
+            </svg>
+            <span class="insp-conf-badge" id="insp-conf-badge">
+              Conf:&nbsp;<b id="insp-conf-val">${confPctStr}</b>
+            </span>
+          </div>
         </div>
-        ${severity ? `<div class="insp-verdict-row"><span class="lbl">Severity:</span> <span class="val ${severity.toLowerCase()}">${severity}</span></div>` : ''}
-        ${faultType && faultType !== 'NONE' ? `<div class="insp-verdict-row"><span class="lbl">Fault Archetype:</span> <span class="val highlight">${faultType}</span></div>` : ''}
-        ${explanation ? `<div class="insp-explanation">${explanation}</div>` : ''}
+
+        <!-- Dynamic Confidence Meter -->
+        <div class="insp-conf-meter-wrap" id="insp-conf-meter-wrap">
+          <div class="insp-conf-meter-header">
+            <span class="insp-conf-meter-title"><i class="fa-solid fa-gauge"></i> Decision Certainty</span>
+            <span class="insp-conf-pill ${pillInfo.pillCls}" id="insp-conf-pill">${pillInfo.text}</span>
+          </div>
+          <div class="insp-conf-track">
+            <div class="insp-conf-fill ${pillInfo.fillCls}" id="insp-conf-fill" style="width: ${confWidth}"></div>
+          </div>
+        </div>
+
+        <!-- Dynamic Switch-Over Indicator -->
+        <div class="insp-switch-banner" id="insp-switch-banner" style="display:none">
+          <i class="fa-solid fa-bolt-lightning"></i>
+          <span id="insp-switch-msg">Active Target Stream Evaluation</span>
+        </div>
+
+        <div class="insp-verdict-row" id="insp-severity-row" style="${severity ? '' : 'display:none'}">
+          <span class="lbl">Severity:</span>
+          <span class="val ${(severity||'').toLowerCase()}" id="insp-severity-val">${severity||''}</span>
+        </div>
+        <div class="insp-verdict-row" id="insp-fault-row" style="${faultType && faultType !== 'NONE' ? '' : 'display:none'}">
+          <span class="lbl">Fault Archetype:</span>
+          <span class="val highlight" id="insp-fault-val">${faultType||''}</span>
+        </div>
+        <div class="insp-explanation" id="insp-explanation" style="${explanation ? '' : 'display:none'}">${explanation||''}</div>
       </div>
     </div>
   `;
@@ -1278,18 +1545,18 @@ function updateInspector(station) {
         <div class="insp-score-list">
           <div class="insp-score-row">
             <span class="score-lbl">Ch1 Temporal Score:</span>
-            <div class="sg-score-bar-wrap"><div class="sg-score-bar ${getScoreBarClass(dec.temporal_score)}" style="width:${Math.min(100, Math.max(0, (dec.temporal_score||0)*100))}%"></div></div>
-            <span class="score-val">${(dec.temporal_score||0).toFixed(2)}</span>
+            <div class="sg-score-bar-wrap"><div class="sg-score-bar ${getScoreBarClass(dec.temporal_score)}" id="insp-bar-ch1" style="width:${Math.min(100, Math.max(0, (dec.temporal_score||0)*100))}%"></div></div>
+            <span class="score-val" id="insp-val-ch1">${(dec.temporal_score||0).toFixed(2)}</span>
           </div>
           <div class="insp-score-row">
             <span class="score-lbl">Ch2 Physics (T<sub>v</sub>, e, N):</span>
-            <div class="sg-score-bar-wrap"><div class="sg-score-bar ${getScoreBarClass(dec.physics_score)}" style="width:${Math.min(100, Math.max(0, (dec.physics_score||0)*100))}%"></div></div>
-            <span class="score-val">${(dec.physics_score||0).toFixed(2)}</span>
+            <div class="sg-score-bar-wrap"><div class="sg-score-bar ${getScoreBarClass(dec.physics_score)}" id="insp-bar-ch2" style="width:${Math.min(100, Math.max(0, (dec.physics_score||0)*100))}%"></div></div>
+            <span class="score-val" id="insp-val-ch2">${(dec.physics_score||0).toFixed(2)}</span>
           </div>
           <div class="insp-score-row">
             <span class="score-lbl">Ch3 DACM Advection:</span>
-            <div class="sg-score-bar-wrap"><div class="sg-score-bar ${getScoreBarClass(dec.dacm_connectivity)}" style="width:${Math.min(100, Math.max(0, (dec.dacm_connectivity||0)*100))}%"></div></div>
-            <span class="score-val">${(dec.dacm_connectivity||0).toFixed(2)}</span>
+            <div class="sg-score-bar-wrap"><div class="sg-score-bar ${getScoreBarClass(dec.dacm_connectivity)}" id="insp-bar-ch3" style="width:${Math.min(100, Math.max(0, (dec.dacm_connectivity||0)*100))}%"></div></div>
+            <span class="score-val" id="insp-val-ch3">${(dec.dacm_connectivity||0).toFixed(2)}</span>
           </div>
         </div>
       </div>
@@ -1593,7 +1860,15 @@ function renderStepResult(r) {
 
   // Dynamically update Station Inspector drawer
   if (STATE.inspectedStation || STATE.selectedStation) {
-    updateInspector(STATE.inspectedStation || STATE.selectedStation);
+    const inspStation = STATE.inspectedStation || STATE.selectedStation;
+    const inspId = inspStation?.station_id;
+    // If the inspector is showing the active target and the verdict section already
+    // exists in the DOM, patch only the dynamic elements (preserves scroll, fires CSS transitions)
+    if (inspId === targetId && document.getElementById('insp-conf-val')) {
+      patchVerdictPanel(dec, cls, obs);
+    } else {
+      updateInspector(inspStation);
+    }
   }
 
   setStrip(undefined, undefined, undefined, undefined,
@@ -1622,14 +1897,37 @@ function renderStepResult(r) {
 
   // ── Decision panel ──
   const chip = document.getElementById('decision-chip');
-  chip.className   = 'sg-status-chip ' + cls;
-  chip.textContent = cls.replace(/_/g,' ');
-  document.getElementById('dt-classification').textContent = cls.replace(/_/g,' ');
-  document.getElementById('dt-severity').textContent       = dec.severity          || '—';
-  document.getElementById('dt-confidence').textContent     = dec.confidence != null ? (dec.confidence*100).toFixed(1)+'%' : '—';
-  document.getElementById('dt-fault').textContent          = res.fault_type         || '—';
-  document.getElementById('dt-action').textContent         = dec.summary_explanation || '—';
-  document.getElementById('decision-warmup-alert').style.display = 'none';
+  if (chip) {
+    chip.className   = 'sg-status-chip ' + cls;
+    chip.textContent = cls.replace(/_/g,' ');
+  }
+  const dtCls = document.getElementById('dt-classification');
+  if (dtCls) dtCls.textContent = cls.replace(/_/g,' ');
+  const dtSev = document.getElementById('dt-severity');
+  if (dtSev) dtSev.textContent = dec.severity || '—';
+
+  const confStr   = dec.confidence != null ? (dec.confidence * 100).toFixed(1) + '%' : '—';
+  const confNumEl = document.getElementById('dt-conf-num');
+  const confBarEl = document.getElementById('dt-conf-bar');
+  if (confNumEl) {
+    confNumEl.textContent = confStr;
+  } else {
+    const dtConf = document.getElementById('dt-confidence');
+    if (dtConf) dtConf.textContent = confStr;
+  }
+  if (confBarEl) {
+    const barPct = dec.confidence != null ? Math.min(100, Math.max(0, dec.confidence * 100)).toFixed(1) + '%' : '0%';
+    confBarEl.style.width = barPct;
+    confBarEl.style.background = cls === 'STATION_SENSOR_FAULT' ? '#ef4444'
+                               : cls === 'GENUINE_METEOROLOGICAL_EVENT' ? '#a855f7'
+                               : cls === 'UNCERTAIN_INSUFFICIENT_EVIDENCE' ? '#f59e0b' : '#10b981';
+  }
+  const dtFault = document.getElementById('dt-fault');
+  if (dtFault) dtFault.textContent = res.fault_type || '—';
+  const dtAction = document.getElementById('dt-action');
+  if (dtAction) dtAction.textContent = dec.summary_explanation || '—';
+  const warmupAlert = document.getElementById('decision-warmup-alert');
+  if (warmupAlert) warmupAlert.style.display = 'none';
 
   // ── Channel 1: Temporal ──
   document.getElementById('level-ch1-text').textContent = dec.summary_explanation || '—';
@@ -1862,21 +2160,75 @@ function exportAuditJSON() {
 /* ── BENCHMARKS ─────────────────────────────────────────────── */
 async function runBenchmarks() {
   if (!STATE.selectedStation) return;
-  document.getElementById('benchmark-loading').style.display = 'flex';
-  document.getElementById('benchmark-empty').style.display   = 'none';
-  document.getElementById('scenario-grid').innerHTML = '';
-  document.getElementById('run-benchmark-btn').disabled = true;
+
+  const loadingEl = document.getElementById('benchmark-loading');
+  const emptyEl   = document.getElementById('benchmark-empty');
+  const gridEl    = document.getElementById('scenario-grid');
+  const btnEl     = document.getElementById('run-benchmark-btn');
+
+  // Verify model is ready before running
   try {
-    const resp = await apiGetQuery('/api/benchmarks/scenarios', { station_id: STATE.selectedStation.station_id });
+    const ctx = await apiGet('/api/pipeline/context');
+    if (!ctx.model_ready) {
+      gridEl.innerHTML = `<div class="sg-alert warning">
+        <i class="fa-solid fa-triangle-exclamation"></i>
+        <strong>Model not ready.</strong> Select a station on the Network Explorer tab and wait for training to complete.
+      </div>`;
+      return;
+    }
+  } catch(e) { /* proceed anyway */ }
+
+  loadingEl.style.display = 'flex';
+  emptyEl.style.display   = 'none';
+  gridEl.innerHTML = '';
+  btnEl.disabled = true;
+
+  const PHASES = [
+    'Generating physics-consistent synthetic dataset (6 scenarios)...',
+    'Running dual-channel inference (Ch1 Temporal + Ch2 Physics)...',
+    'Evaluating DACM advective propagation couplings...',
+    'Compiling scenario evidence traces and verdicts...',
+  ];
+  let phaseIdx = 0;
+  const loadingSubEl = document.getElementById('benchmark-loading-sub');
+  if (loadingSubEl) loadingSubEl.textContent = PHASES[0];
+  const phaseTimer = setInterval(() => {
+    phaseIdx = (phaseIdx + 1) % PHASES.length;
+    if (loadingSubEl) loadingSubEl.textContent = PHASES[phaseIdx];
+  }, 4000);
+
+  try {
+    const sid = STATE.selectedStation.station_id;
+    const resp = await apiPost(`/api/benchmark/run?station_id=${encodeURIComponent(sid)}`, null);
+    clearInterval(phaseTimer);
     const scenarios = resp.scenarios || [];
+    const passCount  = resp.scenarios_passed   || 0;
+    const totalCount = resp.scenarios_evaluated || 0;
+    const summaryEl  = document.getElementById('benchmark-summary');
+    if (summaryEl && totalCount > 0) {
+      summaryEl.innerHTML = `
+        <div style="display:flex;align-items:center;gap:12px;padding:10px 0;font-size:13px;flex-wrap:wrap">
+          <span style="color:var(--text-muted)">Station: <strong style="color:var(--primary)">${resp.target_station_id}</strong></span>
+          <span style="color:var(--text-muted)">|</span>
+          <span>Scenarios: <strong>${totalCount}</strong></span>
+          <span style="color:var(--text-muted)">|</span>
+          <span style="color:${passCount===totalCount ? 'var(--c-normal)' : 'var(--c-warn)'}">
+            <strong>${passCount}/${totalCount} PASSED</strong>
+          </span>
+          <span style="color:var(--text-muted)">|</span>
+          <span style="color:var(--text-muted)">Model: ${resp.model_source || 'REAL_HISTORICAL'}</span>
+        </div>`;
+      summaryEl.style.display = 'block';
+    }
     renderBenchmarkCards(scenarios);
   } catch (e) {
+    clearInterval(phaseTimer);
     console.error('Benchmark error:', e);
-    document.getElementById('scenario-grid').innerHTML =
-      `<div class="sg-alert warning"><i class="fa-solid fa-triangle-exclamation"></i> Benchmark error: ${e.message}</div>`;
+    gridEl.innerHTML = `<div class="sg-alert warning"><i class="fa-solid fa-triangle-exclamation"></i> Benchmark error: ${e.message}</div>`;
   } finally {
-    document.getElementById('benchmark-loading').style.display = 'none';
-    document.getElementById('run-benchmark-btn').disabled = false;
+    clearInterval(phaseTimer);
+    loadingEl.style.display = 'none';
+    btnEl.disabled = false;
   }
 }
 
@@ -1885,54 +2237,206 @@ function renderBenchmarkCards(scenarios) {
   if (!scenarios.length) {
     grid.innerHTML = '<div class="sg-alert warning"><i class="fa-solid fa-triangle-exclamation"></i> No scenario results returned.</div>'; return;
   }
-  grid.innerHTML = scenarios.map((sc, i) => {
-    const pass    = sc.passed !== undefined ? sc.passed : (sc.target_status === sc.expected_status);
-    const badgeClass = pass ? 'pass' : 'fail';
-    const badgeText  = pass ? 'PASS' : 'FAIL';
-    const exp     = sc.expected_status || sc.expected || '—';
-    const det     = sc.target_status   || sc.detected || '—';
-    const ePhys   = sc.e_phys != null ? parseFloat(sc.e_phys).toFixed(3) : '—';
-    const eProp   = sc.e_prop != null ? parseFloat(sc.e_prop).toFixed(3) : '—';
-    const expEv   = sc.expected_evidence || {};
 
-    const expEvHtml = (expEv.temporal || expEv.physics || expEv.dacm) ? `
-      <div class="sc-evidence-box" style="margin-top:6px;font-size:11px">
-        ${expEv.temporal ? `<div><strong>Temporal (Ch1):</strong> ${expEv.temporal}</div>` : ''}
-        ${expEv.physics  ? `<div><strong>Physics (Ch2):</strong> ${expEv.physics}</div>` : ''}
-        ${expEv.dacm     ? `<div><strong>DACM (Ch3):</strong> ${expEv.dacm}</div>` : ''}
+  // Band colours — mirrors fusion.py thresholds
+  const BAND_COLOUR = { HIGH: 'var(--c-fault)', MODERATE: 'var(--c-warn, #f59e0b)', LOW: 'var(--c-normal)' };
+
+  function fmt(v, decimals=3) { return (v != null && v !== undefined) ? parseFloat(v).toFixed(decimals) : '—'; }
+  function fmtBand(band) {
+    const c = BAND_COLOUR[band] || 'var(--text-muted)';
+    return `<span style="font-weight:700;color:${c}">${band || '—'}</span>`;
+  }
+  function agrSymbol(expBand, measBand) {
+    if (!expBand || !measBand) return '<span style="color:var(--text-muted)">?</span>';
+    return expBand === measBand
+      ? '<span style="color:var(--c-normal)">✓</span>'
+      : '<span style="color:var(--c-fault)">✗</span>';
+  }
+  // Extract qualitative direction from expected_evidence strings like "HIGH — ..."
+  function expBandOf(str) {
+    if (!str) return null;
+    const m = str.match(/^(HIGH|MODERATE|LOW)/i);
+    return m ? m[1].toUpperCase() : null;
+  }
+
+  // Branch label → human readable sentence
+  const BRANCH_TEXT = {
+    'branch_1_propagation_confirmed':   'Fusion Branch 1: propagation evidence ≥ 0.35 — classified as genuine meteorological event.',
+    'branch_2_normal_baseline':         'Fusion Branch 2: both temporal and physics scores below normal thresholds — classified as normal.',
+    'branch_3_physics_violation':       'Fusion Branch 3: thermodynamic inconsistency (E_phys ≥ 0.30) — physics violation classified as sensor fault.',
+    'branch_4a_isolated_dacm_confirmed':'Fusion Branch 4a: elevated local score with DACM connectivity present but no downstream propagation — isolated fault (hard negative).',
+    'branch_4b_isolated_severe_spike':  'Fusion Branch 4b: severe local spike (score ≥ 1.0) without network corroboration — isolated fault.',
+    'branch_5a_calm_or_low_coupling':   'Fusion Branch 5a: mild anomaly under calm-wind or low-coupling conditions — classified as UNCERTAIN.',
+    'branch_5b_localized_no_propagation':'Fusion Branch 5b: localised anomaly without propagation — classified as sensor fault.',
+    'branch_5c_ambiguous':              'Fusion Branch 5c: ambiguous observation — classified as UNCERTAIN.',
+  };
+
+  grid.innerHTML = scenarios.map((sc, i) => {
+    const pass      = sc.passed !== undefined ? sc.passed : false;
+    const badgeClass= pass ? 'pass' : 'fail';
+    const badgeText = pass ? 'PASS' : 'FAIL';
+    const exp       = sc.expected_status || '—';
+    const det       = sc.target_status   || '—';
+    const ev        = sc.evidence || {};
+    const expEv     = sc.expected_evidence || {};
+    const trace     = sc.trace || {};
+    const t1        = ev.temporal || {};
+    const t2        = ev.physics  || {};
+    const t3        = ev.dacm     || {};
+    const fus       = ev.fusion   || {};
+
+    // ── Block A: Anomaly & design intent ─────────────────────────────────
+    const expEvDesignHtml = (expEv.temporal || expEv.physics || expEv.dacm) ? `
+      <div class="sc-design-intent" style="margin-top:6px;font-size:11px;opacity:0.75;border-left:2px solid var(--text-muted);padding-left:8px">
+        <div style="font-style:italic;margin-bottom:3px">Benchmark design intent (pre-inference expectations):</div>
+        ${expEv.temporal ? `<div>Ch1 Temporal: ${expEv.temporal}</div>` : ''}
+        ${expEv.physics  ? `<div>Ch2 Physics: ${expEv.physics}</div>`  : ''}
+        ${expEv.dacm     ? `<div>Ch3 DACM: ${expEv.dacm}</div>`        : ''}
       </div>` : '';
 
+    const injTs = trace.injection_timestamp
+      ? new Date(trace.injection_timestamp).toLocaleString('en-IN', {timeZone:'UTC', hour12:false}) + ' UTC'
+      : '—';
+    const evalTs = trace.evaluated_timestamp
+      ? new Date(trace.evaluated_timestamp).toLocaleString('en-IN', {timeZone:'UTC', hour12:false}) + ' UTC'
+      : '—';
+
+    // ── Block B: Measured evidence trace ──────────────────────────────────
+    const ch1Band   = t1.band || '—';
+    const ch2Band   = t2.band || '—';
+    const ch3Band   = t3.band || '—';
+
+    // Coupling list for DACM
+    const couplings = (t3.couplings || []);
+    const couplingRows = couplings.length
+      ? couplings.map(c => {
+          const resp = c.observed_response === true ? '✓ observed'
+                     : c.observed_response === false ? '✗ not observed'
+                     : '— not evaluable';
+          const tau  = c.travel_time_min != null ? `τ ≈ ${parseFloat(c.travel_time_min).toFixed(0)} min` : '';
+          return `<div style="font-size:10px;color:var(--text-muted);margin-left:12px">
+            → ${c.target || '?'} ${tau ? `(${tau})` : ''} : ${resp}
+          </div>`;
+        }).join('')
+      : `<div style="font-size:10px;color:var(--text-muted);margin-left:12px">No downstream couplings registered.</div>`;
+
+    // Fusion branch narration
+    const branchText = BRANCH_TEXT[fus.fusion_branch] || (fus.fusion_branch ? `Branch: ${fus.fusion_branch}` : '—');
+
+    // ── Block C: Per-channel reconciliation ───────────────────────────────
+    const expBand1  = expBandOf(expEv.temporal);
+    const expBand2  = expBandOf(expEv.physics);
+    const expBand3  = expBandOf(expEv.dacm);
+
+    // ── Block D: Verdict rationale ────────────────────────────────────────
+    let verdictHtml = `<div style="font-size:12px;line-height:1.5;color:var(--text-secondary)">${fus.summary_explanation || '—'}</div>`;
+    // Sc5 FAIL — honest explanation per §6
+    if (!pass && exp === 'GENUINE_METEOROLOGICAL_EVENT') {
+      verdictHtml += `
+        <div class="sg-alert" style="margin-top:8px;font-size:11px;background:rgba(239,68,68,0.08);border:1px solid rgba(239,68,68,0.25);padding:8px;border-radius:6px">
+          <strong>Why it failed:</strong> Ch1 temporal score ${fmt(t1.score,3)} (${ch1Band}) and 
+          Ch2 physics score ${fmt(t2.score,3)} (${ch2Band}) were compatible with design intent, 
+          but Ch3 measured propagation evidence <strong>${fmt(t3.propagation_evidence,3)}</strong> — 
+          ${couplings.length
+            ? 'no compatible downstream response was detected within the expected advective arrival window.'
+            : 'DACM had no downstream-coupled neighbour or wind-based coupling was unavailable.'
+          }
+          The fusion cascade therefore took the isolated-anomaly branch and returned ${det.replace(/_/g,' ')}.
+          <br><em>Diagnostic note: DACM propagation evidence did not register in this synthetic front scenario; 
+          see Ch3 trace for the coupling state at evaluation time.</em>
+        </div>`;
+    }
+
     return `<div class="sg-scenario-card ${pass ? 'passed' : 'failed'}">
+
+      <!-- ── Block A: Anomaly & design intent ── -->
       <div class="sc-header">
         <div class="sc-title">${sc.title || sc.name || `Scenario ${i+1}`}</div>
         <span class="sc-badge ${badgeClass}">${badgeText}</span>
       </div>
-      <div class="sc-desc">${sc.description || ''}</div>
-      <div class="sc-evidence-box">
-        <div class="sc-evidence-row">
-          <span class="sc-evidence-label">Physics Inconsistency (E_phys):</span>
-          <span class="sc-evidence-val" style="color:${sc.e_phys > 0.35 ? 'var(--c-fault)' : 'var(--c-normal)'}">${ePhys}</span>
+      <div class="sc-desc" style="margin-bottom:4px">${sc.description || ''}</div>
+      <div style="font-size:10px;color:var(--text-muted);margin-bottom:2px">
+        Injected: t=${trace.injection_timestep_index ?? '—'} (${injTs}) &nbsp;|&nbsp;
+        Evaluated: t=${trace.evaluated_timestep_index ?? '—'} (${evalTs}) &nbsp;|&nbsp;
+        Eval window: [${(trace.evaluation_window||['—','—']).join('–')}]
+      </div>
+      ${expEvDesignHtml}
+
+      <!-- ── Block B: Measured evidence trace ── -->
+      <div style="margin-top:10px;border-top:1px solid var(--border-subtle);padding-top:8px">
+        <div style="font-size:10px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;color:var(--text-muted);margin-bottom:6px">
+          Measured Evidence Trace
         </div>
-        <div class="sc-evidence-row">
-          <span class="sc-evidence-label">Advective Propagation (E_prop):</span>
-          <span class="sc-evidence-val" style="color:${sc.e_prop > 0.35 ? '#a855f7' : 'var(--text-muted)'}">${eProp}</span>
+
+        <div class="sc-evidence-row" style="flex-direction:column;align-items:flex-start;gap:3px;padding:6px 0;border-bottom:1px solid var(--border-subtle)">
+          <div style="font-size:11px">
+            <strong>Ch1 Temporal</strong> — score ${fmtBand(ch1Band)} <span style="color:var(--text-muted)">${fmt(t1.score,3)}</span>
+          </div>
+          <div style="font-size:11px;color:var(--text-secondary)">${t1.level_1_text || '—'}</div>
+        </div>
+
+        <div class="sc-evidence-row" style="flex-direction:column;align-items:flex-start;gap:3px;padding:6px 0;border-bottom:1px solid var(--border-subtle)">
+          <div style="font-size:11px">
+            <strong>Ch2 Physics</strong> — composite ${fmtBand(ch2Band)} <span style="color:var(--text-muted)">${fmt(t2.score,3)}</span>
+            <span style="color:var(--text-muted);font-size:10px"> 
+              | Tv: ${fmt(t2.r_virtual_temp_k)} K &nbsp; e: ${fmt(t2.r_vapor_pressure_hpa)} hPa &nbsp; N: ${fmt(t2.r_refractive_index)}
+            </span>
+          </div>
+          <div style="font-size:11px;color:var(--text-secondary)">${t2.level_2_text || '—'}</div>
+        </div>
+
+        <div class="sc-evidence-row" style="flex-direction:column;align-items:flex-start;gap:3px;padding:6px 0;border-bottom:1px solid var(--border-subtle)">
+          <div style="font-size:11px">
+            <strong>Ch3 DACM</strong> — propagation evidence ${fmtBand(ch3Band)} <span style="color:var(--text-muted)">${fmt(t3.propagation_evidence,3)}</span>
+            <span style="color:var(--text-muted);font-size:10px"> | connectivity: ${fmt(t3.connectivity,3)} | regional mismatch: ${fmt(t3.regional_mismatch,3)}</span>
+          </div>
+          <div style="font-size:11px;color:var(--text-secondary)">${t3.level_3_text || '—'}</div>
+          ${couplingRows}
+        </div>
+
+        <div class="sc-evidence-row" style="flex-direction:column;align-items:flex-start;gap:3px;padding:6px 0">
+          <div style="font-size:11px">
+            <strong>Fusion</strong> — 
+            <span class="sg-status-chip ${fus.classification || ''}" style="font-size:9px">${(fus.classification||'—').replace(/_/g,' ')}</span>
+            confidence <span style="color:var(--text-muted)">${fmt(fus.confidence,2)}</span> &nbsp;
+            severity <span style="color:var(--text-muted)">${fus.severity || '—'}</span> &nbsp;
+            reliability <span style="color:var(--text-muted)">${fmt(fus.target_reliability,2)}</span>
+          </div>
+          <div style="font-size:11px;color:var(--text-secondary)">${branchText}</div>
+          ${fus.recommended_action ? `<div style="font-size:10px;color:var(--text-muted);font-style:italic">${fus.recommended_action}</div>` : ''}
         </div>
       </div>
-      ${expEvHtml}
-      <div class="sc-verdict-row">
-        <div>
-          <span style="font-size:10px;color:var(--text-muted)">Expected:</span>
-          <span class="sg-status-chip ${exp}" style="font-size:9px">${exp.replace(/_/g,' ')}</span>
+
+      <!-- ── Block C: Expected vs Detected + reconciliation ── -->
+      <div style="margin-top:8px;border-top:1px solid var(--border-subtle);padding-top:8px">
+        <div class="sc-verdict-row">
+          <div>
+            <span style="font-size:10px;color:var(--text-muted)">Expected:</span>
+            <span class="sg-status-chip ${exp}" style="font-size:9px">${exp.replace(/_/g,' ')}</span>
+          </div>
+          <i class="fa-solid fa-arrow-right" style="color:var(--text-muted);font-size:10px"></i>
+          <div>
+            <span style="font-size:10px;color:var(--text-muted)">Model Detected:</span>
+            <span class="sg-status-chip ${det}" style="font-size:9px">${det.replace(/_/g,' ')}</span>
+          </div>
         </div>
-        <i class="fa-solid fa-arrow-right" style="color:var(--text-muted);font-size:10px"></i>
-        <div>
-          <span style="font-size:10px;color:var(--text-muted)">Model Detected:</span>
-          <span class="sg-status-chip ${det}" style="font-size:9px">${det.replace(/_/g,' ')}</span>
+        <div style="margin-top:6px;font-size:10px;color:var(--text-muted)">
+          <span style="margin-right:12px">Ch1: design ${expBand1||'?'} · measured ${ch1Band} ${agrSymbol(expBand1,ch1Band)}</span>
+          <span style="margin-right:12px">Ch2: design ${expBand2||'?'} · measured ${ch2Band} ${agrSymbol(expBand2,ch2Band)}</span>
+          <span>Ch3: design ${expBand3||'?'} · measured ${ch3Band} ${agrSymbol(expBand3,ch3Band)}</span>
         </div>
       </div>
+
+      <!-- ── Block D: Verdict rationale ── -->
+      <div style="margin-top:8px;border-top:1px solid var(--border-subtle);padding-top:8px">
+        <div style="font-size:10px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;color:var(--text-muted);margin-bottom:4px">Verdict Rationale</div>
+        ${verdictHtml}
+      </div>
+
     </div>`;
   }).join('');
 }
+
 
 /* ── SEARCH ─────────────────────────────────────────────────── */
 function initSearch() {
@@ -2033,3 +2537,185 @@ document.addEventListener('DOMContentLoaded', () => {
   showLoading('Initialising SkyGuard AI…', 'Connecting to backend & loading map…', 1);
   initMap();
 });
+
+/* ================================================================
+   LIVE EDGE STATION — Phase 1 client-side module
+   Polls /api/edge-scrape/latest every EDGE_POLL_MS milliseconds.
+   Completely isolated: touches only #page-edge elements.
+   ================================================================ */
+const EDGE_POLL_MS = 7000;  // matches server-side POLL_INTERVAL_S
+let _edgePollTimer = null;
+let _edgeLogStarted = false;
+
+/* ── Helpers ──────────────────────────────────────────────────── */
+function _edgeSet(id, value) {
+  const el = document.getElementById(id);
+  if (el) el.textContent = (value !== null && value !== undefined) ? String(value) : '—';
+}
+function _edgeFmt(v, decimals = 1) {
+  if (v === null || v === undefined) return '—';
+  return typeof v === 'number' ? v.toFixed(decimals) : String(v);
+}
+function _edgeFmtBool(v) {
+  if (v === null || v === undefined) return '—';
+  return v ? 'YES' : 'NO';
+}
+function _edgeFmtTime(iso) {
+  if (!iso) return '—';
+  try {
+    const d = new Date(iso);
+    return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  } catch { return iso; }
+}
+
+/* ── Status card update ────────────────────────────────────────── */
+function _edgeUpdateStatus(data) {
+  const dot   = document.getElementById('edge-status-dot');
+  const label = document.getElementById('edge-status-label');
+  const card  = document.getElementById('edge-status-card');
+  const badge = document.getElementById('edge-nav-badge');
+  const errRow = document.getElementById('edge-error-row');
+  const errMsg = document.getElementById('edge-error-msg');
+  const st = data.scrape_status;
+
+  // Nav badge
+  if (badge) {
+    badge.className = 'edge-nav-badge ' + (
+      st === 'OK'          ? '' :
+      st === 'UNREACHABLE' ? 'unreachable' : 'waiting'
+    );
+    badge.title = st;
+  }
+
+  if (dot && label && card) {
+    dot.className   = 'edge-status-dot ' + (st === 'OK' ? 'ok' : st === 'UNREACHABLE' ? 'unreachable' : '');
+    label.textContent = st === 'OK'          ? '● Connected — receiving live data'
+                      : st === 'UNREACHABLE' ? '✕ Device unreachable'
+                      : '◌ Waiting for first scrape…';
+    card.classList.toggle('unreachable', st === 'UNREACHABLE');
+  }
+
+  _edgeSet('edge-last-success',
+    data.last_success_at ? _edgeFmtTime(data.last_success_at) + ' (local)' : '—');
+  _edgeSet('edge-poll-interval', data.poll_interval_s ? data.poll_interval_s + ' s' : '—');
+
+  if (errRow && errMsg) {
+    const hasErr = st === 'UNREACHABLE' && data.last_error;
+    errRow.style.display = hasErr ? 'flex' : 'none';
+    errMsg.textContent   = hasErr ? data.last_error : '';
+  }
+}
+
+/* ── Reading cards update ──────────────────────────────────────── */
+function _edgeUpdateReading(r) {
+  if (!r) return;
+
+  _edgeSet('edge-station-id', r.station_id || '—');
+
+  // Temperature / humidity / pressure
+  _edgeSet('edge-temp',   _edgeFmt(r.temperature_c, 1));
+  _edgeSet('edge-hum',    _edgeFmt(r.humidity_pct,  1));
+  _edgeSet('edge-pres',   _edgeFmt(r.pressure_hpa,  1));
+  _edgeSet('edge-rain-pct', r.rain_pct !== undefined ? String(r.rain_pct) : '—');
+
+  // Rain detection
+  const rainDet = document.getElementById('edge-rain-det');
+  if (rainDet) {
+    const detected = r.rain_detected;
+    rainDet.textContent  = detected ? '🌧 Rain DETECTED' : 'Dry — no rain detected';
+    rainDet.className    = 'edge-reading-unit edge-rain-det ' + (detected ? 'rain-yes' : 'rain-no');
+  }
+
+  // Device verdict
+  const verdict = document.getElementById('edge-device-verdict');
+  if (verdict) {
+    const isAnom = (r.status === 'ANOMALOUS') || r.flagged;
+    verdict.textContent = r.status || '—';
+    verdict.className   = 'edge-device-verdict' + (isAnom ? ' anomalous' : '');
+  }
+  _edgeSet('edge-phys-score', r.composite_physics_inconsistency !== undefined
+    ? _edgeFmt(r.composite_physics_inconsistency, 4) : '—');
+
+  // Physics residuals
+  _edgeSet('edge-r-vt',       _edgeFmt(r.r_virtual_temp_k,      4));
+  _edgeSet('edge-r-vp',       _edgeFmt(r.r_vapor_pressure_hpa,  4));
+  _edgeSet('edge-r-ri',       r.r_refractive_index !== undefined
+    ? r.r_refractive_index.toExponential(3) : '—');
+  _edgeSet('edge-dalton',     _edgeFmtBool(r.dalton_violation));
+  _edgeSet('edge-adc',        r.rain_raw_analog !== undefined ? String(r.rain_raw_analog) : '—');
+  _edgeSet('edge-rain-dig',   _edgeFmtBool(r.rain_digital_raw));
+}
+
+/* ── Scrape log table ─────────────────────────────────────────── */
+async function _edgeRefreshLog() {
+  try {
+    const data = await apiGet('/api/edge-scrape/history?limit=50');
+    const tbody = document.getElementById('edge-log-tbody');
+    if (!tbody) return;
+    const rows = data.readings || [];
+    if (rows.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="8" class="edge-log-empty">No readings yet — waiting for first successful scrape…</td></tr>';
+      return;
+    }
+    tbody.innerHTML = rows.map(r => {
+      const isAnom = (r.status === 'ANOMALOUS') || r.flagged;
+      const stCls  = isAnom ? 'status-anomalous' : 'status-normal';
+      const rnCls  = r.rain_detected ? 'rain-yes-cell' : 'rain-no-cell';
+      return `<tr>
+        <td>${_edgeFmtTime(r.received_at)}</td>
+        <td>${_edgeFmt(r.temperature_c, 1)}</td>
+        <td>${_edgeFmt(r.humidity_pct,  1)}</td>
+        <td>${_edgeFmt(r.pressure_hpa,  1)}</td>
+        <td>${r.rain_pct !== undefined ? r.rain_pct + '%' : '—'}</td>
+        <td class="${rnCls}">${_edgeFmtBool(r.rain_detected)}</td>
+        <td class="${stCls}">${r.status || '—'}</td>
+        <td>${r.composite_physics_inconsistency !== undefined ? _edgeFmt(r.composite_physics_inconsistency, 4) : '—'}</td>
+      </tr>`;
+    }).join('');
+  } catch (e) {
+    console.warn('[EdgeStation] Log fetch error:', e);
+  }
+}
+
+/* ── Main poll loop ────────────────────────────────────────────── */
+async function _edgePoll() {
+  try {
+    const data = await apiGet('/api/edge-scrape/latest');
+    _edgeUpdateStatus(data);
+    if (data.reading) {
+      _edgeUpdateReading(data.reading);
+    }
+    await _edgeRefreshLog();
+  } catch (e) {
+    console.warn('[EdgeStation] Poll error:', e);
+    _edgeUpdateStatus({ scrape_status: 'UNREACHABLE', last_error: String(e), poll_interval_s: EDGE_POLL_MS / 1000 });
+  }
+}
+
+/* ── Start / stop ─────────────────────────────────────────────── */
+function startEdgePolling() {
+  if (_edgePollTimer) return;  // already running
+  _edgePoll();  // immediate first fetch
+  _edgePollTimer = setInterval(_edgePoll, EDGE_POLL_MS);
+}
+function stopEdgePolling() {
+  if (_edgePollTimer) { clearInterval(_edgePollTimer); _edgePollTimer = null; }
+}
+
+/* ── Hook into navigateTo (safe patch after page load) ────────── */
+// We patch window.navigateTo after DOMContentLoaded so the original
+// function declaration (which uses 'function' hoisting) is already set.
+document.addEventListener('DOMContentLoaded', () => {
+  const _origNav = navigateTo;           // capture the hoisted original
+  window.navigateTo = function(page) {   // replace on the global object
+    _origNav(page);
+    if (page === 'edge') {
+      startEdgePolling();
+    }
+  };
+});
+
+// Start polling immediately so the nav badge is live from the moment the app loads
+setTimeout(startEdgePolling, 1500);
+
+

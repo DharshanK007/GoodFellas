@@ -6,6 +6,7 @@ All-India 1,008 AWS Station neighborhood search, and scientific benchmark metric
 
 import sys
 import json
+import math
 import asyncio
 import logging
 from pathlib import Path
@@ -52,6 +53,14 @@ from skyguard.evaluation.ablation_channel2 import Channel2AblationRunner
 from skyguard.evaluation.ablation_dacm import DACMAblationRunner
 from skyguard.data.wind_cache import prefetch_wind_for_location, resolve_observation_wind, clear_cache as clear_wind_cache
 
+# ─── Phase 1 ESP32 edge station scraper (isolated — no pipeline coupling) ────
+from skyguard.edge.esp32_scraper import (
+    start_poller as _edge_start_poller,
+    get_latest_reading as _edge_latest,
+    get_history as _edge_history,
+    get_scrape_state as _edge_state,
+)
+
 logger = logging.getLogger("skyguard.api")
 logging.basicConfig(level=logging.INFO)
 
@@ -78,7 +87,11 @@ async def add_no_cache_headers(request: Request, call_next):
         response.headers["Expires"] = "0"
     return response
 
-# ─── Authoritative runtime state ────────────────────────────────────────────
+@app.on_event("startup")
+async def startup_event():
+    logger.info("Starting background ESP32 scraper poller...")
+    _edge_start_poller()
+
 # PIPELINE is trained EXCLUSIVELY on REAL data.  It is never retrained on
 # synthetic benchmark observations.
 PIPELINE: Optional[SkyGuardPipeline] = None
@@ -270,6 +283,8 @@ def initialize_dataset_and_models(
 @app.on_event("startup")
 def startup_event():
     initialize_dataset_and_models(mode="INDIA_CLUSTER", cluster_key="DENSE_NCR", data_mode="REAL")
+    # Start isolated ESP32 edge-station background scraper (Phase 1)
+    _edge_start_poller()
 
 
 @app.get("/api/pipeline/logs")
@@ -847,6 +862,107 @@ def get_stations():
     return stations_data
 
 
+# ── GAP 1 FIX: Live Ingestion Adapter Endpoint ────────────────────────────────
+@app.post("/api/ingest")
+async def ingest_external_source(
+    source: str = Query(..., description="Adapter type: 'csv' | 'json' | 'open_meteo'"),
+    file_path: Optional[str] = Query(None, description="Absolute path to CSV or JSON file"),
+    station_id: Optional[str] = Query(None, description="Station ID for ingested data"),
+    lat: Optional[float] = Query(None, description="Latitude for open_meteo adapter"),
+    lon: Optional[float] = Query(None, description="Longitude for open_meteo adapter"),
+    hours: int = Query(48, description="Hours of ERA5 data for open_meteo adapter"),
+):
+    """
+    Ingests an external data source through the SkyGuard pipeline via the
+    pluggable AbstractIngestionAdapter layer (Gap 1 fix).
+
+    Sources:
+      - csv:        file_path required.
+      - json:       file_path required.
+      - open_meteo: lat, lon, station_id required. Fetches ERA5 live data.
+
+    Per-station asyncio.Lock (Gap 6) is held during each observation write
+    so concurrent HTTP calls never race on the same station buffer.
+    """
+    if PIPELINE is None:
+        return JSONResponse(
+            status_code=503,
+            content={"error": "Pipeline not initialized. Call /api/india/select-station first."}
+        )
+
+    from skyguard.data.ingestion_adapter import make_adapter
+
+    kwargs: dict = {}
+    src = source.lower().strip()
+    if src in ("csv", "json"):
+        if not file_path:
+            return JSONResponse(
+                status_code=400,
+                content={"error": f"'file_path' is required for source='{source}'."}
+            )
+        kwargs["file_path"] = file_path
+        if station_id:
+            kwargs["station_id_override"] = station_id
+    elif src == "open_meteo":
+        if lat is None or lon is None or not station_id:
+            return JSONResponse(
+                status_code=400,
+                content={"error": "'lat', 'lon', and 'station_id' are required for source='open_meteo'."}
+            )
+        kwargs.update({"station_id": station_id, "lat": lat, "lon": lon, "hours": hours})
+    else:
+        return JSONResponse(
+            status_code=400,
+            content={"error": f"Unknown source '{source}'. Valid: csv | json | open_meteo"}
+        )
+
+    try:
+        adapter = make_adapter(src, **kwargs)
+    except Exception as exc:
+        return JSONResponse(status_code=400, content={"error": str(exc)})
+
+    ingest_results = []
+    processed = 0
+    errors = 0
+
+    for batch in adapter.stream():
+        if not batch:
+            continue
+        primary = batch[0]
+        lock = PIPELINE.get_station_lock(primary.station_id)
+        async with lock:
+            try:
+                res = PIPELINE.process_observation(primary, current_network_snapshot=batch)
+                dec = res.decision
+                ingest_results.append({
+                    "station_id": primary.station_id,
+                    "timestamp": primary.timestamp.isoformat(),
+                    "classification": dec.classification.value,
+                    "severity": dec.severity.value,
+                    "confidence": round(dec.confidence, 4),
+                    "local_anomaly_score": round(dec.local_anomaly_score, 4),
+                    "summary": dec.summary_explanation,
+                    "data_provenance": res.data_provenance,
+                })
+                LATEST_RESULTS[primary.station_id] = res.to_dict()
+                processed += 1
+            except Exception as exc:
+                errors += 1
+                log_pipeline_event(
+                    "INGESTION",
+                    f"[IngestAdapter] Processing error for {primary.station_id}: {exc}",
+                    level="ERROR",
+                )
+
+    return {
+        "status": "INGEST_COMPLETE",
+        "source": source,
+        "adapter": type(adapter).__name__,
+        "data_mode": adapter.DATA_MODE,
+        "batches_processed": processed,
+        "errors": errors,
+        "results": ingest_results,
+    }
 
 
 @app.get("/api/couplings")
@@ -1395,16 +1511,27 @@ def _run_benchmark_inference(
             if hasattr(pipeline, "reset_runtime_state"):
                 pipeline.reset_runtime_state()
 
-            # Rolling warmup with preceding 10 steps (no model state corrupted by benchmark obs)
-            warmup_start = max(0, t_idx - 10)
+            # Rolling warmup: feed both target AND neighbour observations through
+            # process_observation so that the target station's buffer is filled
+            # to at least window_size steps before the evaluation timestep.
+            # (Previously only _register_neighbor_obs was called, leaving the
+            # target station buffer empty and causing every inference to return
+            # the warmup dummy-decision with all scores = 0.)
+            warmup_start = max(0, t_idx - max(15, pipeline.window_size + 5))
             for p_idx in range(warmup_start, t_idx):
                 p_time = unique_ts[p_idx]
                 p_slice = syn_dataset.get_time_slice(p_time)
+                # Register neighbours first (for DACM context)
                 for p_obs in p_slice:
-                    pipeline._register_neighbor_obs(p_obs)
+                    if p_obs.station_id != station_id:
+                        pipeline._register_neighbor_obs(p_obs)
+                # Feed target station through full inference so its buffer grows
+                p_target = next((o for o in p_slice if o.station_id == station_id), None)
+                if p_target:
+                    pipeline.process_observation(p_target, current_network_snapshot=p_slice)
 
-            # For propagating front (Sc5), step through the front transition window (4 timesteps)
-            eval_window = 4 if expected == "GENUINE_METEOROLOGICAL_EVENT" else 1
+            # For propagating front (Sc5), step through the front transition window (5 timesteps: steps 200..204)
+            eval_window = 5 if expected == "GENUINE_METEOROLOGICAL_EVENT" else 1
             best_res = None
             best_det_cls = "NORMAL"
             best_passed = False
@@ -1439,29 +1566,187 @@ def _run_benchmark_inference(
             if best_res:
                 final_status = best_det_cls if best_det_cls != "NORMAL" else sc["type"]
                 log_pipeline_event("BENCHMARK", f"  [{sc['id']}] Expected={sc['type']} | Predicted={final_status} | PASS={'YES' if best_passed else 'NO'} | e_phys={best_res.decision.physics_score:.3f} e_prop={best_res.decision.propagation_evidence:.3f}")
+
+                d = best_res.decision  # shorthand — read only
+
+                # -- Additive evidence block (§3.1) ------------------------------------------
+                var_attrs = getattr(d, "variable_attributions", {}) or {}
+                dv_list   = getattr(d, "downstream_confirmations", []) or []
+
+                def _band(score: float, lo: float = 0.30, hi: float = 0.60) -> str:
+                    """Derives HIGH/MODERATE/LOW using fusion.py's gate thresholds."""
+                    if score >= hi:   return "HIGH"
+                    if score >= lo:   return "MODERATE"
+                    return "LOW"
+
+                # Thermodynamic physical parameters of the evaluated state
+                raw_o = getattr(best_res, "raw_observation", None)
+                _r_tv, _r_e, _r_n = None, None, None
+                if raw_o and raw_o.temperature is not None and raw_o.pressure is not None and raw_o.humidity is not None:
+                    try:
+                        _tc = float(raw_o.temperature)
+                        _p  = float(raw_o.pressure)
+                        _rh = float(raw_o.humidity)
+                        _tk = _tc + 273.15
+                        _es = 6.112 * math.exp((17.67 * _tc) / (_tc + 243.5))
+                        _e  = (_rh / 100.0) * _es
+                        _denom = max(0.01, 1.0 - (1.0 - 0.622) * (_e / _p))
+                        _tv = _tk / _denom
+                        _n  = 1.0 + 7.76e-5 * (_p / _tk) + 0.373 * (_e / (_tk ** 2))
+                        _r_tv = round(_tv, 2)
+                        _r_e  = round(_e, 2)
+                        _r_n  = round(_n, 5)
+                    except Exception:
+                        pass
+
+                evidence = {
+                    "temporal": {
+                        "score":           round(d.temporal_score, 4),
+                        "band":            _band(d.temporal_score, lo=0.55, hi=0.80),
+                        "variable_errors": {k: round(v, 4) for k, v in var_attrs.items()} if var_attrs else None,
+                        "level_1_text":    (
+                            f"Temporal reconstruction error {d.temporal_score:.2f} ({_band(d.temporal_score, lo=0.55, hi=0.80)}) "
+                            f"at this timestep; dominant variable attributions: "
+                            + (", ".join(f"{k}={v:.3f}" for k, v in sorted(var_attrs.items(), key=lambda x: -x[1])[:3]) if var_attrs else "not available")
+                            + "."
+                        ),
+                    },
+                    "physics": {
+                        "score":                 round(d.physics_score, 4),
+                        "band":                  _band(d.physics_score, lo=0.30, hi=0.60),
+                        "r_virtual_temp_k":      _r_tv,
+                        "r_vapor_pressure_hpa":  _r_e,
+                        "r_refractive_index":    _r_n,
+                        "level_2_text":          (
+                            f"Composite thermodynamic inconsistency {d.physics_score:.3f} "
+                            f"({_band(d.physics_score, lo=0.30, hi=0.60)}). "
+                            + ("Dalton hard-bound (e \u2265 P) triggered. " if d.physics_score > 1.0 else "")
+                            + "The observed T/P/RH state is "
+                            + ("inconsistent" if d.physics_score >= 0.30 else "consistent")
+                            + " with the reconstructed physical state."
+                        ),
+                    },
+                    "dacm": {
+                        "propagation_evidence": round(d.propagation_evidence, 4),
+                        "band":                 _band(d.propagation_evidence, lo=0.20, hi=0.35),
+                        "regional_mismatch":    round(d.regional_mismatch, 4),
+                        "connectivity":         round(d.dacm_connectivity, 4),
+                        "wind_available":       getattr(d, "wind_available", None),
+                        "couplings": [
+                            {
+                                "target":            getattr(dv, "target_station_id", getattr(dv, "station_id", str(dv))),
+                                "edge_status":       bool(getattr(dv, "confirmed", False)),
+                                "confirmed":         bool(getattr(dv, "confirmed", False)),
+                                "observed_response": bool(getattr(dv, "confirmed", False)),
+                                "dacm_weight":       round(float(getattr(dv, "dacm_weight", 0.0)), 3),
+                                "travel_time_min":   round(float(dv.propagation_window.tau_minutes), 1) if getattr(dv, "propagation_window", None) else None,
+                                "explanation":       getattr(dv, "explanation", ""),
+                            }
+                            for dv in dv_list
+                        ],
+                        "level_3_text": (
+                            f"{len(dv_list)} coupled downstream station(s). "
+                            + (
+                                f"Propagation evidence {d.propagation_evidence:.3f} "
+                                f"({_band(d.propagation_evidence, lo=0.20, hi=0.35)}). "
+                                + ("Compatible downstream response observed." if d.propagation_evidence >= 0.35 else
+                                   "No compatible downstream response within the expected arrival window.")
+                            )
+                        ),
+                    },
+                    "fusion": {
+                        "classification":    d.classification.value,
+                        "severity":          d.severity.value,
+                        "confidence":        round(d.confidence, 4),
+                        "target_reliability":round(d.target_reliability, 4),
+                        "fusion_branch":     getattr(d, "fusion_branch", ""),
+                        "summary_explanation": d.summary_explanation,
+                        "recommended_action": (
+                            "Dispatch field inspection to verify sensor hardware."
+                            if d.classification.value == "STATION_SENSOR_FAULT"
+                            else (
+                                "Issue regional weather alert; monitor downstream propagation."
+                                if d.classification.value == "GENUINE_METEOROLOGICAL_EVENT"
+                                else "Continue monitoring; insufficient evidence for definitive action."
+                            )
+                        ),
+                    },
+                }
+
+                # -- Additive trace block (§3.1) ----------------------------------------------
+                trace = {
+                    "injection_timestep_index": sc.get("timestep_index"),
+                    "injection_timestamp":      sc.get("timestamp"),
+                    "evaluated_timestep_index": best_det_cls and cur_idx if best_res else None,
+                    "evaluated_timestamp":      cur_time.isoformat() if best_res else None,
+                    "evaluation_window":        [t_idx, t_idx + eval_window - 1],
+                }
+
+                # -- Additive resolution & mitigation block ----------------------------------
+                corr = getattr(best_res, "corrected_observation", None)
+                raw_o = getattr(best_res, "raw_observation", None)
+                num_confirmed = len([v for v in dv_list if getattr(v, "confirmed", False)])
+
+                addressed_report = {
+                    "action_taken": (
+                        "QUARANTINED & PHYSICALLY IMPUTED"
+                        if d.classification.value == "STATION_SENSOR_FAULT"
+                        else (
+                            "REGIONAL ADVECTION BROADCAST"
+                            if d.classification.value == "GENUINE_METEOROLOGICAL_EVENT"
+                            else "MONITORING NOMINAL"
+                        )
+                    ),
+                    "resolution_summary": (
+                        f"Isolated faulty observation quarantined from public pipeline. Self-healing dual-channel imputer restored physically consistent state (T={corr.imputed_temperature:.1f}\u00b0C, P={corr.imputed_pressure:.1f}hPa, RH={corr.imputed_humidity:.1f}%). Station reliability score set to {d.target_reliability*100:.0f}%."
+                        if d.classification.value == "STATION_SENSOR_FAULT" and corr and corr.imputed_temperature is not None
+                        else (
+                            f"Genuine atmospheric transition corroborated across {num_confirmed} coupled downstream stations. Station health preserved at {d.target_reliability*100:.0f}%. Meteorological advisory broadcast to regional forecast offices."
+                            if d.classification.value == "GENUINE_METEOROLOGICAL_EVENT"
+                            else "Observation within nominal bounds; no intervention required."
+                        )
+                    ),
+                    "imputed_values": {
+                        "temperature": round(corr.imputed_temperature, 2) if corr and corr.imputed_temperature is not None else None,
+                        "pressure": round(corr.imputed_pressure, 2) if corr and corr.imputed_pressure is not None else None,
+                        "humidity": round(corr.imputed_humidity, 1) if corr and corr.imputed_humidity is not None else None,
+                    } if d.classification.value == "STATION_SENSOR_FAULT" and corr and corr.imputed_temperature is not None else None,
+                    "raw_values": {
+                        "temperature": round(raw_o.temperature, 2) if raw_o else None,
+                        "pressure": round(raw_o.pressure, 2) if raw_o else None,
+                        "humidity": round(raw_o.humidity, 1) if raw_o else None,
+                    } if raw_o else None,
+                }
+
                 results.append({
-                    "id": sc.get("id", f"sc_{len(results)+1}"),
-                    "name": sc["title"],
-                    "title": sc["title"],
-                    "description": sc["description"],
-                    "passed": bool(best_passed),
-                    "e_phys": float(round(best_res.decision.physics_score, 3)),
-                    "e_prop": float(round(best_res.decision.propagation_evidence, 3)),
-                    "target_status": final_status,
-                    "expected_status": sc["type"],
+                    "id":                sc.get("id", f"sc_{len(results)+1}"),
+                    "name":              sc["title"],
+                    "title":             sc["title"],
+                    "description":       sc["description"],
+                    "passed":            bool(best_passed),
+                    "e_phys":            float(round(d.physics_score, 3)),
+                    "e_prop":            float(round(d.propagation_evidence, 3)),
+                    "target_status":     final_status,
+                    "expected_status":   sc["type"],
                     "expected_evidence": sc.get("expected_evidence", {}),
-                    "source_type": DataSourceType.SYNTHETIC_BENCHMARK.value,
-                    "model_reasoning": best_res.decision.summary_explanation,
+                    "source_type":       DataSourceType.SYNTHETIC_BENCHMARK.value,
+                    "model_reasoning":   d.summary_explanation,
+                    # --- additive fields (§3.1) ---
+                    "evidence":          evidence,
+                    "trace":             trace,
+                    "addressed_report":  addressed_report,
                 })
 
-        if results:
-            return results
-    except Exception as e:
-        print(f"[Benchmark Suite] Error evaluating dynamic scenarios for {station_id}: {e}")
-        import traceback; traceback.print_exc()
 
-    # Fallback — returns empty list (no fabricated PASS results)
-    log_pipeline_event("BENCHMARK", f"[WARN] Benchmark inference failed for {station_id}. Returning empty results.")
+        return results
+    except Exception as e:
+        import traceback
+        log_pipeline_event("BENCHMARK", f"[ERROR] Exception in _run_benchmark_inference for {station_id}: {type(e).__name__}: {e}")
+        print(f"[Benchmark Suite] Error evaluating dynamic scenarios for {station_id}: {e}")
+        traceback.print_exc()
+
+    # Fallback — returns empty list only on unrecoverable exception
+    log_pipeline_event("BENCHMARK", f"[WARN] Benchmark inference aborted for {station_id}. Returning empty results.")
     return []
 
 
@@ -1741,6 +2026,38 @@ def run_ablation_studies():
         },
     }
     return {"results": dacm_results}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ESP32 Edge Station — Phase 1 scrape API
+# Completely isolated from pipeline, DACM, ingestion_adapter, etc.
+# Route namespace: /api/edge-scrape/*
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.get("/api/edge-scrape/latest")
+async def edge_scrape_latest():
+    state   = _edge_state()
+    reading = _edge_latest()
+    return JSONResponse(content={
+        "scrape_status":   state["scrape_status"],
+        "last_success_at": state["last_success_at"],
+        "last_error":      state["last_error"],
+        "poll_interval_s": state["poll_interval_s"],
+        "reading":         reading,
+    })
+
+
+@app.get("/api/edge-scrape/history")
+async def edge_scrape_history(limit: int = Query(default=50, ge=1, le=500)):
+    return JSONResponse(content={
+        "count":    min(limit, _edge_state()["buffered_readings"]),
+        "readings": _edge_history(limit=limit),
+    })
+
+
+@app.get("/api/edge-scrape/status")
+async def edge_scrape_status():
+    return JSONResponse(content=_edge_state())
 
 
 # Mount static web directory

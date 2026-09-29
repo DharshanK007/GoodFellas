@@ -45,6 +45,9 @@ class FusionDecision:
     variable_attributions: Dict[str, float]
     downstream_confirmations: List[DownstreamVerificationResult] = field(default_factory=list)
     summary_explanation: str = ""
+    # Additive read-only label — identifies which cascade branch produced this decision.
+    # Used by the frontend to narrate the fusion path. Does NOT affect any downstream logic.
+    fusion_branch: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -62,6 +65,7 @@ class FusionDecision:
             "target_reliability": round(self.target_reliability, 4),
             "variable_attributions": {k: round(v, 4) for k, v in self.variable_attributions.items()},
             "summary_explanation": self.summary_explanation,
+            "fusion_branch": self.fusion_branch,
         }
 
 
@@ -126,16 +130,27 @@ class EvidenceFusionEngine:
                 variable_attributions=var_attrs,
                 downstream_confirmations=downstream_verifications,
                 summary_explanation=summary,
+                fusion_branch="branch_1_propagation_confirmed",
             )
 
         # 2. Normal Baseline Check (Local model and thermodynamic physics are satisfied)
         if (local_score < 0.70 and physics_score < 0.28) or (local_score < 0.40 and physics_score < 0.35):
+            # Dynamic baseline confidence: sensitively reflects local reconstruction + thermodynamic residuals
+            # As sensor observations fluctuate in the microclimate, confidence actively responds to state variance
+            local_norm = min(1.0, max(0.0, local_score / 0.50))
+            phys_norm  = min(1.0, max(0.0, physics_score / 0.22))
+            reg_norm   = min(1.0, max(0.0, reg_mismatch / 1.00)) if reg_mismatch else 0.0
+            
+            # Weighted atmospheric residual load
+            residual_load = 0.50 * local_norm + 0.35 * phys_norm + 0.15 * reg_norm
+            # Dynamic confidence spanning [0.72, 0.985] - each timestep has a distinct, responsive confidence
+            normal_confidence = round(0.985 - 0.260 * (residual_load ** 0.80), 4)
             return FusionDecision(
                 station_id=station_id,
                 timestamp=timestamp,
                 classification=AnomalyClassification.NORMAL,
                 severity=AnomalySeverity.NORMAL,
-                confidence=0.98,
+                confidence=normal_confidence,
                 local_anomaly_score=local_score,
                 temporal_score=temporal_score,
                 physics_score=physics_score,
@@ -146,12 +161,14 @@ class EvidenceFusionEngine:
                 variable_attributions=var_attrs,
                 downstream_confirmations=downstream_verifications,
                 summary_explanation="Observation is consistent with learned temporal dynamics and thermodynamic state.",
+                fusion_branch="branch_2_normal_baseline",
             )
+
 
         # 3. Station Sensor Fault: Thermodynamic Physics Inconsistency (Channel 2 Violation)
         if physics_score >= 0.30:
             classification = AnomalyClassification.STATION_SENSOR_FAULT
-            confidence = min(0.99, 0.72 + 0.26 * min(1.0, (physics_score - 0.30) / 0.50))
+            confidence = round(min(0.99, 0.72 + 0.26 * min(1.0, (physics_score - 0.30) / 0.45)), 4)
             severity = AnomalySeverity.CRITICAL if physics_score > 0.80 or local_score > 2.5 else (AnomalySeverity.HIGH if physics_score > 0.50 else AnomalySeverity.MEDIUM)
             summary = (
                 f"Thermodynamic inconsistency detected (E_phys = {physics_score:.3f}). "
@@ -174,6 +191,7 @@ class EvidenceFusionEngine:
                 variable_attributions=var_attrs,
                 downstream_confirmations=downstream_verifications,
                 summary_explanation=summary,
+                fusion_branch="branch_3_physics_violation",
             )
 
         # 4. Station Sensor Fault: Isolated Single-Station Perturbation (DACM Ch3 No Propagation)
@@ -184,7 +202,7 @@ class EvidenceFusionEngine:
         if (local_score >= 0.55 or temporal_score >= 0.55) and propagation_evidence < 0.30:
             if not is_calm and dacm_conn >= 0.15:
                 classification = AnomalyClassification.STATION_SENSOR_FAULT
-                confidence = min(0.96, 0.75 + 0.20 * min(1.0, local_score / 2.0))
+                confidence = round(min(0.97, 0.76 + 0.21 * min(1.0, local_score / 1.50)), 4)
                 severity = AnomalySeverity.HIGH if local_score > 1.5 else AnomalySeverity.MEDIUM
                 summary = (
                     f"Isolated station disturbance detected (local_score = {local_score:.2f}, temporal = {temporal_score:.2f}). "
@@ -207,10 +225,11 @@ class EvidenceFusionEngine:
                     variable_attributions=var_attrs,
                     downstream_confirmations=downstream_verifications,
                     summary_explanation=summary,
+                    fusion_branch="branch_4a_isolated_dacm_confirmed",
                 )
             elif local_score >= 1.00:
                 classification = AnomalyClassification.STATION_SENSOR_FAULT
-                confidence = min(0.95, 0.70 + 0.20 * min(1.0, local_score / 2.0))
+                confidence = round(min(0.96, 0.72 + 0.23 * min(1.0, local_score / 1.80)), 4)
                 severity = AnomalySeverity.HIGH
                 summary = (
                     f"Severe local anomaly spike detected (score = {local_score:.2f}). "
@@ -232,34 +251,38 @@ class EvidenceFusionEngine:
                     variable_attributions=var_attrs,
                     downstream_confirmations=downstream_verifications,
                     summary_explanation=summary,
+                    fusion_branch="branch_4b_isolated_severe_spike",
                 )
 
         # 5. Uncertain / Insufficient Evidence: Calm Winds or Low Coupling with Mild Anomaly
         if (dacm_conn < self.thresholds.CALM_COUPLING_THRESHOLD or is_calm) and physics_score < 0.30 and local_score < 1.00:
             classification = AnomalyClassification.UNCERTAIN_INSUFFICIENT_EVIDENCE
-            confidence = 0.55
+            confidence = round(0.52 + 0.16 * min(1.0, local_score / 0.80), 4)
             severity = AnomalySeverity.LOW
             summary = (
                 f"Mild local anomaly detected (score = {local_score:.2f}), "
                 "but spatial network verification is unavailable due to calm winds (s < 0.5 m/s) or low station coupling. "
                 "Classified conservatively as UNCERTAIN."
             )
+            _branch = "branch_5a_calm_or_low_coupling"
         elif local_score >= 0.60 or temporal_score >= 0.60:
             classification = AnomalyClassification.STATION_SENSOR_FAULT
-            confidence = 0.75
+            confidence = round(0.70 + 0.22 * min(1.0, max(local_score, temporal_score) / 1.60), 4)
             severity = AnomalySeverity.MEDIUM
             summary = (
                 f"Localized sensor anomaly detected (score = {local_score:.2f}, temporal = {temporal_score:.2f}) "
                 "without regional propagation evidence."
             )
+            _branch = "branch_5b_localized_no_propagation"
         else:
             classification = AnomalyClassification.UNCERTAIN_INSUFFICIENT_EVIDENCE
-            confidence = 0.50
+            confidence = round(0.48 + 0.16 * min(1.0, (local_score + physics_score) / 1.20), 4)
             severity = AnomalySeverity.LOW
             summary = (
                 f"Ambiguous observation (score = {local_score:.2f}, physics = {physics_score:.2f}), "
                 f"propagation evidence = {propagation_evidence:.2f}."
             )
+            _branch = "branch_5c_ambiguous"
 
         return FusionDecision(
             station_id=station_id,
@@ -277,4 +300,6 @@ class EvidenceFusionEngine:
             variable_attributions=var_attrs,
             downstream_confirmations=downstream_verifications,
             summary_explanation=summary,
+            fusion_branch=_branch,
         )
+

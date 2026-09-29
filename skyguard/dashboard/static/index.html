@@ -32,6 +32,10 @@
     <button class="sg-nav-link"        id="nav-analysis"     onclick="navigateTo('analysis')"><i class="fa-solid fa-chart-line"></i> Station Analysis</button>
     <button class="sg-nav-link"        id="nav-validate"     onclick="navigateTo('validate')"><i class="fa-solid fa-flask"></i> Testing &amp; Validation</button>
     <button class="sg-nav-link"        id="nav-methodology"  onclick="navigateTo('methodology')"><i class="fa-solid fa-book"></i> Methodology</button>
+    <button class="sg-nav-link edge-nav-btn" id="nav-edge" onclick="navigateTo('edge')">
+      <i class="fa-solid fa-microchip"></i> Live Edge Station
+      <span class="edge-nav-badge" id="edge-nav-badge"></span>
+    </button>
   </div>
   <div class="sg-nav-right">
     <button class="sg-btn ghost small terminal-nav-btn" onclick="togglePipelineModal()" title="View Live Pipeline Ingestion & Neural Training Telemetry">
@@ -188,7 +192,7 @@
             <table class="sg-metric-table">
               <tr><td>Classification</td><td id="dt-classification">—</td></tr>
               <tr><td>Severity</td><td id="dt-severity">—</td></tr>
-              <tr><td>Confidence</td><td id="dt-confidence" class="mono">—</td></tr>
+              <tr><td>Confidence</td><td id="dt-confidence" class="mono"><div class="dt-conf-wrapper"><span id="dt-conf-num">—</span><div class="dt-conf-mini-bar-wrap"><div class="dt-conf-mini-bar" id="dt-conf-bar"></div></div></div></td></tr>
               <tr><td>Fault Archetype</td><td id="dt-fault">—</td></tr>
               <tr><td>Action</td><td id="dt-action" style="font-size:11px">—</td></tr>
             </table>
@@ -300,9 +304,16 @@
         <i class="fa-solid fa-play"></i> Run Benchmark Suite
       </button>
     </div>
-    <div id="benchmark-loading" style="display:none;align-items:center;gap:10px;padding:16px"><div class="mini-spinner"></div> Running 4 scenario benchmarks…</div>
+    <div id="benchmark-loading" style="display:none;flex-direction:column;align-items:flex-start;gap:6px;padding:16px">
+      <div style="display:flex;align-items:center;gap:10px">
+        <div class="mini-spinner"></div>
+        <span style="font-weight:600">Running Full Benchmark Suite...</span>
+      </div>
+      <div id="benchmark-loading-sub" style="font-size:12px;color:var(--text-muted);padding-left:30px">Generating physics-consistent synthetic dataset (6 scenarios)...</div>
+    </div>
+    <div id="benchmark-summary" style="display:none;border-bottom:1px solid var(--border-subtle);margin-bottom:12px"></div>
     <div id="benchmark-empty" class="empty-hint">
-      <i class="fa-solid fa-circle-info"></i> Select a station and click Run Benchmark Suite to evaluate all 4 fault scenarios.
+      <i class="fa-solid fa-circle-info"></i> Select a station and click Run Benchmark Suite to evaluate all 6 fault scenarios with full evidence trace.
     </div>
     <div class="sg-scenario-grid" id="scenario-grid"></div>
 
@@ -343,6 +354,158 @@
     <p>Six canonical fault scenarios are injected: (1) temperature spike +13.5°C, (2) frozen temperature sensor, (3) gradual pressure drift, (4) humidity saturation fault, (5) coherent propagating cold front, (6) hard negative isolated disturbance. PASS/FAIL determined by comparing model output to expected ground-truth classification.</p>
     <h2>Dataset Playback vs Live AWS</h2>
     <p>The system operates in <strong>Dataset Playback</strong> mode — 14-day hourly observations are fetched from Open-Meteo API and traversed sequentially. Live telemetry ingestion is a planned operational extension.</p>
+  </div>
+</section>
+
+<!-- ======================================================
+     PAGE 5: LIVE EDGE STATION  (Phase 1 — Hardware Sanity Check)
+     Isolated from all SkyGuard AI pipeline output.
+     ====================================================== -->
+<section class="sg-page" id="page-edge">
+  <div class="edge-page-wrap">
+
+    <!-- ── PAGE HEADER ─────────────────────────────────────────── -->
+    <div class="edge-page-header">
+      <div class="edge-page-title">
+        <i class="fa-solid fa-microchip"></i>
+        <div>
+          <h1>Live Edge Station</h1>
+          <p class="edge-page-subtitle">Hardware sanity-check view — raw ESP32 sensor readings, unprocessed by the SkyGuard AI pipeline.</p>
+        </div>
+      </div>
+      <div class="edge-isolation-badge">
+        <i class="fa-solid fa-shield-halved"></i> Phase 1 — Pipeline Isolated
+      </div>
+    </div>
+
+    <!-- ── CONNECTION STATUS CARD ───────────────────────────────── -->
+    <div class="edge-status-row">
+      <div class="edge-status-card" id="edge-status-card">
+        <div class="edge-status-indicator" id="edge-status-indicator">
+          <span class="edge-status-dot" id="edge-status-dot"></span>
+          <span class="edge-status-label" id="edge-status-label">Connecting…</span>
+        </div>
+        <div class="edge-status-meta">
+          <span class="edge-meta-key">Last successful scrape</span>
+          <span class="edge-meta-val" id="edge-last-success">—</span>
+        </div>
+        <div class="edge-status-meta" id="edge-error-row" style="display:none">
+          <span class="edge-meta-key" style="color:#ef4444">Error</span>
+          <span class="edge-meta-val" id="edge-error-msg" style="color:#ef4444;font-size:11px">—</span>
+        </div>
+        <div class="edge-status-meta">
+          <span class="edge-meta-key">Poll interval</span>
+          <span class="edge-meta-val" id="edge-poll-interval">—</span>
+        </div>
+      </div>
+
+      <!-- Station ID badge -->
+      <div class="edge-station-badge-card">
+        <div class="edge-station-id" id="edge-station-id">—</div>
+        <div class="edge-station-label">Station ID</div>
+        <div class="edge-onboard-status" id="edge-onboard-status">
+          <span class="edge-device-verdict" id="edge-device-verdict">—</span>
+        </div>
+        <div class="edge-station-label" style="margin-top:4px">Device verdict</div>
+        <div style="margin-top:6px">
+          <span class="edge-score-label">Physics inconsistency score:</span>
+          <span class="edge-score-val" id="edge-phys-score">—</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── LIVE READINGS GRID ────────────────────────────────────── -->
+    <div class="edge-readings-grid">
+      <div class="edge-reading-card">
+        <div class="edge-reading-icon" style="color:#f59e0b"><i class="fa-solid fa-temperature-half"></i></div>
+        <div class="edge-reading-label">Temperature</div>
+        <div class="edge-reading-val" id="edge-temp">—</div>
+        <div class="edge-reading-unit">°C · DHT11</div>
+      </div>
+      <div class="edge-reading-card">
+        <div class="edge-reading-icon" style="color:#38bdf8"><i class="fa-solid fa-droplet"></i></div>
+        <div class="edge-reading-label">Humidity</div>
+        <div class="edge-reading-val" id="edge-hum">—</div>
+        <div class="edge-reading-unit">% RH · DHT11</div>
+      </div>
+      <div class="edge-reading-card">
+        <div class="edge-reading-icon" style="color:#a78bfa"><i class="fa-solid fa-gauge-high"></i></div>
+        <div class="edge-reading-label">Pressure</div>
+        <div class="edge-reading-val" id="edge-pres">—</div>
+        <div class="edge-reading-unit">hPa · BMP180</div>
+      </div>
+      <div class="edge-reading-card">
+        <div class="edge-reading-icon" style="color:#34d399"><i class="fa-solid fa-cloud-rain"></i></div>
+        <div class="edge-reading-label">Rain %</div>
+        <div class="edge-reading-val" id="edge-rain-pct">—</div>
+        <div class="edge-reading-unit edge-rain-det" id="edge-rain-det">Analog calibrated</div>
+      </div>
+    </div>
+
+    <!-- ── PHYSICS RESIDUALS (debug detail) ──────────────────────── -->
+    <div class="edge-residuals-section">
+      <div class="edge-section-title"><i class="fa-solid fa-flask"></i> On-Device Physics Residuals</div>
+      <div class="edge-residuals-grid">
+        <div class="edge-res-cell">
+          <span class="edge-res-key">Virtual Temp residual</span>
+          <span class="edge-res-val" id="edge-r-vt">—</span>
+          <span class="edge-res-unit">K</span>
+        </div>
+        <div class="edge-res-cell">
+          <span class="edge-res-key">Vapor pressure residual</span>
+          <span class="edge-res-val" id="edge-r-vp">—</span>
+          <span class="edge-res-unit">hPa</span>
+        </div>
+        <div class="edge-res-cell">
+          <span class="edge-res-key">Refractive index residual</span>
+          <span class="edge-res-val" id="edge-r-ri">—</span>
+          <span class="edge-res-unit">&nbsp;</span>
+        </div>
+        <div class="edge-res-cell">
+          <span class="edge-res-key">Dalton violation</span>
+          <span class="edge-res-val" id="edge-dalton">—</span>
+          <span class="edge-res-unit">&nbsp;</span>
+        </div>
+        <div class="edge-res-cell">
+          <span class="edge-res-key">Rain analog ADC</span>
+          <span class="edge-res-val" id="edge-adc">—</span>
+          <span class="edge-res-unit">/ 4095</span>
+        </div>
+        <div class="edge-res-cell">
+          <span class="edge-res-key">Rain digital pin</span>
+          <span class="edge-res-val" id="edge-rain-dig">—</span>
+          <span class="edge-res-unit">(diagnostic)</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── SCRAPE LOG TABLE ───────────────────────────────────────── -->
+    <div class="edge-log-section">
+      <div class="edge-section-title">
+        <i class="fa-solid fa-list"></i> Scrape Log
+        <span class="edge-log-note">(newest first — live, auto-refreshes every 7 s)</span>
+      </div>
+      <div class="edge-log-table-wrap">
+        <table class="edge-log-table">
+          <thead>
+            <tr>
+              <th>Received at (local)</th>
+              <th>Temp (°C)</th>
+              <th>Humidity (%)</th>
+              <th>Pressure (hPa)</th>
+              <th>Rain %</th>
+              <th>Rain detected</th>
+              <th>Device status</th>
+              <th>Physics score</th>
+            </tr>
+          </thead>
+          <tbody id="edge-log-tbody">
+            <tr><td colspan="8" class="edge-log-empty">Waiting for first scrape…</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
   </div>
 </section>
 

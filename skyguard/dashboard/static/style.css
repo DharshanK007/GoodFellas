@@ -400,7 +400,208 @@ a { color: var(--primary); text-decoration: none; }
   line-height: 1.4;
   padding-top: 6px;
   border-top: 1px dashed var(--chrome-border);
+  transition: color 0.4s ease;
 }
+
+/* ── Dynamic verdict update animations ── */
+@keyframes verdict-flash {
+  0%   { background: rgba(14,165,233,0.22); box-shadow: 0 0 0 2px rgba(14,165,233,0.35); }
+  60%  { background: rgba(14,165,233,0.08); box-shadow: 0 0 0 1px rgba(14,165,233,0.15); }
+  100% { background: transparent; box-shadow: none; }
+}
+@keyframes verdict-flash-warn {
+  0%   { background: rgba(245,158,11,0.22); box-shadow: 0 0 0 2px rgba(245,158,11,0.35); }
+  60%  { background: rgba(245,158,11,0.08); }
+  100% { background: transparent; box-shadow: none; }
+}
+@keyframes verdict-flash-fault {
+  0%   { background: rgba(239,68,68,0.22); box-shadow: 0 0 0 2px rgba(239,68,68,0.35); }
+  60%  { background: rgba(239,68,68,0.08); }
+  100% { background: transparent; box-shadow: none; }
+}
+.verdict-changed         { animation: verdict-flash       0.55s ease forwards; border-radius: 5px; }
+.verdict-changed-warn    { animation: verdict-flash-warn   0.55s ease forwards; border-radius: 5px; }
+.verdict-changed-fault   { animation: verdict-flash-fault  0.55s ease forwards; border-radius: 5px; }
+
+/* Confidence ring: animated circular progress around the badge */
+.insp-conf-ring-wrap {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+.insp-conf-ring {
+  width: 36px; height: 36px;
+  flex-shrink: 0;
+}
+.insp-conf-ring circle {
+  fill: none;
+  stroke-width: 3;
+  stroke-linecap: round;
+  transform-origin: 50% 50%;
+  transform: rotate(-90deg);
+  transition: stroke-dashoffset 0.6s cubic-bezier(0.4,0,0.2,1), stroke 0.4s ease;
+}
+.insp-conf-ring .bg   { stroke: rgba(255,255,255,0.07); }
+.insp-conf-ring .fg   { stroke: var(--primary); }
+.insp-conf-ring .fg.normal { stroke: #10b981; }
+.insp-conf-ring .fg.warn  { stroke: #f59e0b; }
+.insp-conf-ring .fg.fault { stroke: #ef4444; }
+.insp-conf-ring .fg.met   { stroke: #a855f7; }
+
+/* Confidence number inside card header */
+.insp-conf-badge {
+  font-size: 10px;
+  color: var(--chrome-text-2);
+  font-family: var(--font-mono);
+  transition: color 0.35s ease;
+}
+.insp-conf-badge b {
+  color: var(--primary);
+  font-size: 11px;
+  transition: color 0.35s ease;
+}
+
+/* Dynamic Confidence Meter inside AI Verdict Card */
+.insp-conf-meter-wrap {
+  margin-top: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px 8px;
+  background: rgba(0, 0, 0, 0.22);
+  border-radius: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+}
+.insp-conf-meter-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.insp-conf-meter-title {
+  color: var(--chrome-text-3);
+  text-transform: uppercase;
+  font-size: 9px;
+  letter-spacing: 0.5px;
+  font-weight: 600;
+}
+.insp-conf-pill {
+  font-size: 9.5px;
+  font-weight: 700;
+  padding: 2px 7px;
+  border-radius: 12px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  transition: all 0.35s ease;
+}
+.insp-conf-pill.high {
+  background: rgba(16, 185, 129, 0.15);
+  color: #10b981;
+  border: 1px solid rgba(16, 185, 129, 0.3);
+}
+.insp-conf-pill.med {
+  background: rgba(14, 165, 233, 0.15);
+  color: #38bdf8;
+  border: 1px solid rgba(14, 165, 233, 0.3);
+}
+.insp-conf-pill.warn {
+  background: rgba(245, 158, 11, 0.15);
+  color: #f59e0b;
+  border: 1px solid rgba(245, 158, 11, 0.3);
+}
+.insp-conf-pill.fault {
+  background: rgba(239, 68, 68, 0.15);
+  color: #ef4444;
+  border: 1px solid rgba(239, 68, 68, 0.3);
+}
+.insp-conf-pill.met {
+  background: rgba(168, 85, 247, 0.15);
+  color: #a855f7;
+  border: 1px solid rgba(168, 85, 247, 0.3);
+}
+.insp-conf-track {
+  height: 6px;
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 3px;
+  overflow: hidden;
+  position: relative;
+}
+.insp-conf-fill {
+  height: 100%;
+  border-radius: 3px;
+  transition: width 0.45s cubic-bezier(0.4, 0, 0.2, 1), background 0.35s ease, box-shadow 0.35s ease;
+}
+.insp-conf-fill.fill-normal {
+  background: linear-gradient(90deg, #059669, #10b981);
+  box-shadow: 0 0 8px rgba(16, 185, 129, 0.45);
+}
+.insp-conf-fill.fill-fault {
+  background: linear-gradient(90deg, #dc2626, #ef4444);
+  box-shadow: 0 0 8px rgba(239, 68, 68, 0.45);
+}
+.insp-conf-fill.fill-met {
+  background: linear-gradient(90deg, #7c3aed, #a855f7);
+  box-shadow: 0 0 8px rgba(168, 85, 247, 0.45);
+}
+.insp-conf-fill.fill-warn {
+  background: linear-gradient(90deg, #d97706, #f59e0b);
+  box-shadow: 0 0 8px rgba(245, 158, 11, 0.45);
+}
+
+/* Switch-over transition notification banner */
+.insp-switch-banner {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: rgba(14, 165, 233, 0.12);
+  border: 1px solid rgba(14, 165, 233, 0.35);
+  border-radius: 6px;
+  padding: 4px 8px;
+  font-size: 10px;
+  color: #38bdf8;
+  margin-top: 4px;
+  animation: switch-pulse 1s ease infinite alternate;
+}
+.insp-switch-banner.to-fault {
+  background: rgba(239, 68, 68, 0.12);
+  border-color: rgba(239, 68, 68, 0.35);
+  color: #f87171;
+}
+.insp-switch-banner.to-met {
+  background: rgba(168, 85, 247, 0.12);
+  border-color: rgba(168, 85, 247, 0.35);
+  color: #c084fc;
+}
+.insp-switch-banner.to-normal {
+  background: rgba(16, 185, 129, 0.12);
+  border-color: rgba(16, 185, 129, 0.35);
+  color: #34d399;
+}
+@keyframes switch-pulse {
+  from { opacity: 0.85; transform: scale(0.995); }
+  to   { opacity: 1;    transform: scale(1.005); }
+}
+
+/* Station Analysis Decision Panel enhancements */
+.dt-conf-wrapper {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.dt-conf-mini-bar-wrap {
+  width: 70px;
+  height: 5px;
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 3px;
+  overflow: hidden;
+}
+.dt-conf-mini-bar {
+  height: 100%;
+  border-radius: 3px;
+  transition: width 0.4s ease, background 0.35s ease;
+}
+
 
 .insp-score-list {
   background: var(--chrome-surface2);
@@ -1449,3 +1650,362 @@ a { color: var(--primary); text-decoration: none; }
   pointer-events: none;
   stroke-dasharray: 4, 4;
 }
+
+/* ================================================================
+   LIVE EDGE STATION PAGE — Phase 1 Hardware Sanity Check
+   ================================================================ */
+
+/* ── Nav badge ── */
+.edge-nav-btn {
+  position: relative;
+  border-left: 1px solid rgba(255,255,255,0.10) !important;
+  margin-left: 4px !important;
+  padding-left: 14px !important;
+  color: #34d399 !important;
+}
+.edge-nav-btn.active { color: #34d399 !important; }
+.edge-nav-badge {
+  display: inline-block;
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  background: #34d399;
+  margin-left: 6px;
+  vertical-align: middle;
+  animation: edge-pulse 2s ease-in-out infinite;
+}
+.edge-nav-badge.unreachable { background: #ef4444; animation: none; }
+.edge-nav-badge.waiting     { background: #f59e0b; animation: none; }
+
+@keyframes edge-pulse {
+  0%, 100% { opacity: 1;   transform: scale(1); }
+  50%       { opacity: 0.5; transform: scale(1.35); }
+}
+
+/* ── Page layout ── */
+#page-edge {
+  flex-direction: column;
+  overflow-y: auto;
+  background: var(--bg);
+}
+.edge-page-wrap {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 28px 32px 40px;
+  width: 100%;
+}
+
+/* ── Header ── */
+.edge-page-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 28px;
+}
+.edge-page-title {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+.edge-page-title > i {
+  font-size: 28px;
+  color: #34d399;
+  flex-shrink: 0;
+}
+.edge-page-title h1 {
+  font-size: 20px;
+  font-weight: 700;
+  color: var(--text);
+  line-height: 1.3;
+}
+.edge-page-subtitle {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-top: 3px;
+  line-height: 1.5;
+}
+.edge-isolation-badge {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 14px;
+  background: rgba(52, 211, 153, 0.08);
+  border: 1px solid rgba(52, 211, 153, 0.22);
+  border-radius: 20px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #34d399;
+  white-space: nowrap;
+}
+
+/* ── Status row ── */
+.edge-status-row {
+  display: flex;
+  gap: 16px;
+  margin-bottom: 22px;
+  flex-wrap: wrap;
+}
+.edge-status-card {
+  flex: 1 1 280px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 18px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  box-shadow: var(--shadow-sm);
+}
+.edge-status-card.unreachable {
+  border-color: rgba(239,68,68,0.4);
+  background: rgba(239,68,68,0.04);
+}
+.edge-status-indicator {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.edge-status-dot {
+  width: 12px; height: 12px;
+  border-radius: 50%;
+  background: #f59e0b;          /* WAITING — amber */
+  flex-shrink: 0;
+  transition: background 0.4s;
+}
+.edge-status-dot.ok           { background: #22c55e; animation: edge-pulse 2.5s ease-in-out infinite; }
+.edge-status-dot.unreachable  { background: #ef4444; animation: none; }
+.edge-status-label {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--text);
+}
+.edge-status-meta {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.edge-meta-key {
+  font-size: 11px;
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+.edge-meta-val {
+  font-size: 12px;
+  font-family: var(--font-mono);
+  color: var(--text-secondary);
+  word-break: break-all;
+}
+
+.edge-station-badge-card {
+  flex: 0 1 220px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 18px 20px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  box-shadow: var(--shadow-sm);
+  text-align: center;
+}
+.edge-station-id {
+  font-size: 18px;
+  font-weight: 800;
+  font-family: var(--font-mono);
+  color: #34d399;
+  letter-spacing: 0.04em;
+  margin-bottom: 2px;
+}
+.edge-station-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-muted);
+}
+.edge-device-verdict {
+  display: inline-block;
+  margin-top: 8px;
+  padding: 4px 12px;
+  border-radius: 20px;
+  font-size: 11px;
+  font-weight: 700;
+  background: rgba(52,211,153,0.1);
+  color: #34d399;
+  border: 1px solid rgba(52,211,153,0.25);
+}
+.edge-device-verdict.anomalous {
+  background: rgba(239,68,68,0.1);
+  color: #ef4444;
+  border-color: rgba(239,68,68,0.25);
+}
+.edge-score-label {
+  font-size: 10px;
+  color: var(--text-muted);
+}
+.edge-score-val {
+  font-size: 13px;
+  font-weight: 700;
+  font-family: var(--font-mono);
+  color: var(--text);
+  margin-left: 4px;
+}
+
+/* ── Readings grid ── */
+.edge-readings-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 14px;
+  margin-bottom: 22px;
+}
+@media (max-width: 900px) { .edge-readings-grid { grid-template-columns: repeat(2, 1fr); } }
+@media (max-width: 500px) { .edge-readings-grid { grid-template-columns: 1fr; } }
+
+.edge-reading-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 20px 16px 14px;
+  text-align: center;
+  box-shadow: var(--shadow-sm);
+  transition: box-shadow var(--ease), transform var(--ease);
+}
+.edge-reading-card:hover {
+  box-shadow: var(--shadow-md);
+  transform: translateY(-1px);
+}
+.edge-reading-icon { font-size: 22px; margin-bottom: 8px; }
+.edge-reading-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-muted);
+  margin-bottom: 6px;
+}
+.edge-reading-val {
+  font-size: 32px;
+  font-weight: 800;
+  font-family: var(--font-mono);
+  color: var(--text);
+  line-height: 1.1;
+  min-height: 40px;
+}
+.edge-reading-unit {
+  font-size: 10px;
+  color: var(--text-muted);
+  margin-top: 4px;
+}
+.edge-rain-det.rain-yes {
+  color: #34d399;
+  font-weight: 600;
+}
+.edge-rain-det.rain-no  {
+  color: var(--text-muted);
+}
+
+/* ── Physics residuals section ── */
+.edge-section-title {
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--text-secondary);
+  margin-bottom: 12px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.edge-residuals-section {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 18px 20px;
+  margin-bottom: 22px;
+  box-shadow: var(--shadow-sm);
+}
+.edge-residuals-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 12px;
+}
+@media (max-width: 700px) { .edge-residuals-grid { grid-template-columns: 1fr 1fr; } }
+
+.edge-res-cell {
+  background: var(--surface-3);
+  border-radius: 7px;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.edge-res-key  { font-size: 10px; color: var(--text-muted); }
+.edge-res-val  { font-size: 14px; font-weight: 700; font-family: var(--font-mono); color: var(--text); }
+.edge-res-unit { font-size: 9px;  color: var(--text-muted); }
+
+/* ── Scrape log table ── */
+.edge-log-section {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 18px 20px;
+  box-shadow: var(--shadow-sm);
+}
+.edge-log-note {
+  font-size: 10px;
+  color: var(--text-muted);
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: 0;
+  margin-left: 4px;
+}
+.edge-log-table-wrap {
+  overflow-x: auto;
+  max-height: 340px;
+  overflow-y: auto;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+}
+.edge-log-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+.edge-log-table thead {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--chrome-bg);
+}
+.edge-log-table th {
+  padding: 9px 12px;
+  text-align: left;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: #94a3b8;
+  white-space: nowrap;
+  border-bottom: 1px solid rgba(255,255,255,0.08);
+}
+.edge-log-table td {
+  padding: 7px 12px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  white-space: nowrap;
+  font-size: 11px;
+}
+.edge-log-table tbody tr:hover { background: var(--surface-2); }
+.edge-log-table .status-normal   { color: #22c55e; font-weight: 700; }
+.edge-log-table .status-anomalous{ color: #ef4444; font-weight: 700; }
+.edge-log-table .rain-yes-cell   { color: #34d399; font-weight: 700; }
+.edge-log-table .rain-no-cell    { color: var(--text-muted); }
+.edge-log-empty {
+  text-align: center;
+  color: var(--text-muted);
+  padding: 24px !important;
+  font-family: var(--font-sans) !important;
+  font-style: italic;
+}
+

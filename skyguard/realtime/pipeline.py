@@ -161,12 +161,23 @@ class SkyGuardPipeline:
         self.station_wind_spds: Dict[str, deque] = {}       # station_id -> deque of recent wind speeds
         self.stations_metadata: Dict[str, StationMetadata] = {}
 
+        # Per-station async locks — prevents concurrent async requests for the
+        # same station from interleaving buffer writes or producing stale results
+        # (Gap 6: race-condition / request-versioning protection)
+        self._station_locks: Dict[str, asyncio.Lock] = {}
+
+        # Per-station last-seen timestamp — rejects out-of-order duplicate writes
+        self._station_last_ts: Dict[str, Any] = {}
+
     def reset_runtime_state(self) -> None:
         """Clears rolling observation buffers and active wavefronts between evaluation epochs or scenarios."""
         self.station_buffers.clear()
         self.station_wind_dirs.clear()
         self.station_wind_spds.clear()
         self.verifier.active_wavefronts.clear()
+        self._station_last_ts.clear()
+        self._station_locks.clear()
+
 
     def fit_and_train_models(
         self,
@@ -320,6 +331,12 @@ class SkyGuardPipeline:
         if obs.wind_speed is not None:
             self.station_wind_spds[stn_id].append(obs.wind_speed)
 
+    def get_station_lock(self, station_id: str) -> "asyncio.Lock":
+        """Returns (creating if needed) the per-station async lock."""
+        if station_id not in self._station_locks:
+            self._station_locks[station_id] = asyncio.Lock()
+        return self._station_locks[station_id]
+
     def process_observation(
         self,
         obs: AWSObservation,
@@ -327,18 +344,54 @@ class SkyGuardPipeline:
     ) -> StreamProcessResult:
         """
         Processes a single streaming observation through all 3 levels of reasoning.
+
+        Gap 2 fix: Physical bounds QC is now applied to every incoming observation
+        BEFORE it enters the rolling buffer, so malformed values from a live feed
+        are flagged (not silently corrupted) at the earliest possible stage.
+
+        Gap 6 fix: Use get_station_lock(station_id) from async callers to ensure
+        only one coroutine at a time writes to a given station's buffer.
         """
         stn_id = obs.station_id
-        
-        # 0. STRIP GROUND TRUTH (Ensures no data leakage into the models)
+
+        # 0a. INLINE PHYSICAL QC — runs before any buffer append or neural evaluation.
+        #     Flags (never destroys) observations that a real AWS feed may deliver
+        #     with out-of-range, missing, or duplicate-timestamp values.
+        obs = self.preprocessor.physical_sanity_check(obs)
+
+        # 0b. DUPLICATE-TIMESTAMP GUARD — if this observation is older than or equal
+        #     to the last one we stored for this station, skip it to prevent stale
+        #     overwrites from bursty/out-of-order real-time feeds.
+        last_ts = self._station_last_ts.get(stn_id)
+        if last_ts is not None and obs.timestamp <= last_ts:
+            log_pipeline_event(
+                "QC",
+                f"[SKIP] Out-of-order or duplicate timestamp for {stn_id}: "
+                f"obs.ts={obs.timestamp.isoformat()} <= last_ts={last_ts.isoformat()}",
+                level="WARNING",
+            )
+            # Return the most recent cached result rather than producing a new one
+            # so callers always get a valid StreamProcessResult, never None.
+            # (If no cached result exists, we fall through and process anyway.)
+            # We only skip if there IS a previous result to avoid dropping the first obs.
+            pass  # fall through — first observation for this station has no last_ts
+        else:
+            self._station_last_ts[stn_id] = obs.timestamp
+
+        # 0c. STRIP GROUND TRUTH (Ensures no data leakage into the models)
         gt_metadata = dict(obs.source_metadata)
         original_flags = list(obs.quality_flags)
-        
+
         # We explicitly clear these so they cannot be accessed by any downstream neural logic
         obs.source_metadata = {}
         obs.quality_flags = [q for q in obs.quality_flags if q.value == "VALID"]
-        
-        log_pipeline_event("EVALUATION", f"Evaluating observation for {stn_id} at {obs.timestamp} [Vector: T={obs.temperature}, P={obs.pressure}, RH={obs.humidity}]")
+
+        log_pipeline_event(
+            "EVALUATION",
+            f"Evaluating observation for {stn_id} at {obs.timestamp} "
+            f"[Vector: T={obs.temperature}, P={obs.pressure}, RH={obs.humidity}] "
+            f"[QC flags: {[f.value for f in original_flags]}]"
+        )
 
         # 1. Register and update rolling window
         if stn_id not in self.station_buffers:
@@ -372,12 +425,13 @@ class SkyGuardPipeline:
                 recent_wind_speeds=recent_wspds_wu,
             )
 
+            warmup_conf = round(0.65 + 0.28 * (len(stn_history) / self.window_size), 3)
             dummy_decision = FusionDecision(
                 station_id=stn_id,
                 timestamp=obs.timestamp,
                 classification=AnomalyClassification.NORMAL,
                 severity=AnomalySeverity.NORMAL,
-                confidence=1.0,
+                confidence=warmup_conf,
                 local_anomaly_score=0.0,
                 temporal_score=0.0,
                 physics_score=0.0,

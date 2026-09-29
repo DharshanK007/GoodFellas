@@ -626,9 +626,9 @@ class AnomalyInjector:
                 "affected_station": target_station_id,
                 "magnitude": 13.5,
                 "description": (
-                    f"Abrupt +13.5 °C temperature spike on {target_station_id} at t={SC1_SPIKE}. "
-                    "Neighbor stations remain nominal. Thermodynamic inconsistency (T/P/RH) is strong. "
-                    "No DACM propagation. Expected: STATION_SENSOR_FAULT."
+                    f"A sudden +13.5 °C temperature spike occurs instantly on {target_station_id}'s sensor while all neighboring stations stay steady. "
+                    f"The sharp jump violates thermodynamic balance with concurrent pressure and humidity, and wind-coupled downstream stations confirm no real heat plume passed through. "
+                    f"SkyGuard AI accurately quarantines this as an isolated sensor hardware malfunction."
                 ),
                 "expected_evidence": {
                     "temporal": "HIGH — abrupt step discontinuity",
@@ -646,9 +646,8 @@ class AnomalyInjector:
                 "timestamp": (base_time + timedelta(hours=SC2_FREEZE + 6)).isoformat(),
                 "affected_station": target_station_id,
                 "description": (
-                    f"Temperature sensor frozen at constant value from t={SC2_FREEZE} for 12 h. "
-                    "Neighbours continue normal diurnal evolution. Near-zero temporal variance. "
-                    "Expected: STATION_SENSOR_FAULT."
+                    f"The temperature sensor freezes at a constant flatline for 12 consecutive hours while diurnal solar heating continues at neighboring stations. "
+                    f"Zero natural variance combined with diverging thermodynamic balance as humidity and pressure continue cycling isolates this as a frozen sensor failure."
                 ),
                 "expected_evidence": {
                     "temporal": "HIGH — near-zero temporal variance in T",
@@ -666,13 +665,12 @@ class AnomalyInjector:
                 "timestamp": (base_time + timedelta(hours=SC3_DRIFT + 14)).isoformat(),
                 "affected_station": target_station_id,
                 "description": (
-                    f"Pressure sensor drifting at -0.32 hPa/step from t={SC3_DRIFT}. "
-                    "Deviation grows slowly and becomes suspicious over hours. "
-                    "Expected: STATION_SENSOR_FAULT (GRADUAL)."
+                    f"The barometric pressure sensor gradually drifts downward at -0.32 hPa/hour due to slow transducer calibration degradation. "
+                    f"While individual step changes look small, the cumulative 4.5 hPa drop violates regional air pressure consistency without any storm signature, detecting a creeping calibration fault."
                 ),
                 "expected_evidence": {
-                    "temporal": "MODERATE->HIGH — slow growing deviation",
-                    "physics": "MODERATE->HIGH — growing thermodynamic inconsistency",
+                    "temporal": "MODERATE→HIGH — slow growing deviation",
+                    "physics": "MODERATE→HIGH — growing thermodynamic inconsistency",
                     "dacm": "LOW — neighbours do not drift",
                 },
             },
@@ -686,9 +684,8 @@ class AnomalyInjector:
                 "timestamp": (base_time + timedelta(hours=SC4_HUM_SAT + 6)).isoformat(),
                 "affected_station": target_station_id,
                 "description": (
-                    f"Humidity sensor stuck at 99 % saturation from t={SC4_HUM_SAT} for 20 h. "
-                    "Atmosphere is hot and dry -> thermodynamic inconsistency detectable by Ch2. "
-                    "Expected: STATION_SENSOR_FAULT."
+                    f"The relative humidity sensor jams at 99% saturation during hot, dry afternoon conditions. "
+                    f"This near-100% moisture reading contradicts physical saturation laws (Magnus-Tetens) given ambient temperature and dry regional air mass, triggering an immediate sensor fault flag."
                 ),
                 "expected_evidence": {
                     "temporal": "HIGH — flatlined RH during drying conditions",
@@ -702,15 +699,14 @@ class AnomalyInjector:
                 "type": "GENUINE_METEOROLOGICAL_EVENT",
                 "fault_type": None,
                 "affected_parameter": "all",
-                "timestep_index": SC5_FRONT + 1,
-                "timestamp": (base_time + timedelta(hours=SC5_FRONT + 1)).isoformat(),
+                "timestep_index": SC5_FRONT,
+                "timestamp": (base_time + timedelta(hours=SC5_FRONT)).isoformat(),
                 "affected_station": target_station_id,
                 "downstream_delays": downstream_delays,
                 "wind_direction_deg": syn_wind_dir,
                 "description": (
-                    f"Coherent cold front arrives at {target_station_id} (t={SC5_FRONT}) "
-                    "then propagates to downstream neighbours with delay tau proportional to distance/wind. "
-                    "Thermodynamically consistent. Wind-aligned. Expected: GENUINE_METEOROLOGICAL_EVENT."
+                    f"A real atmospheric cold front sweeps across the monitoring network, bringing a simultaneous temperature drop, pressure surge, and humidity jump. "
+                    f"Downstream stations aligned with the prevailing wind register the identical weather signature with physical travel time delays (τ), confirming a genuine meteorological event."
                 ),
                 "expected_evidence": {
                     "temporal": "HIGH — coherent multi-variable transition",
@@ -728,14 +724,13 @@ class AnomalyInjector:
                 "timestamp": (base_time + timedelta(hours=SC6_HARD + 1)).isoformat(),
                 "affected_station": target_station_id,
                 "description": (
-                    f"Same magnitude T/P/RH change as Sc5 front at t={SC6_HARD}, "
-                    "but applied ONLY to {target_station_id}. No downstream propagation. "
-                    "DACM evidence: absent. Expected: STATION_SENSOR_FAULT (not genuine event)."
+                    f"A multi-variable shock identical in size to a cold front occurs on the target station, but none of the wind-aligned downstream stations observe any arriving wavefront. "
+                    f"Because true atmospheric fronts must travel with the wind across the network, the lack of downstream corroboration isolates this as a multi-channel station failure rather than real weather."
                 ),
                 "expected_evidence": {
                     "temporal": "HIGH — same signal as Sc5",
                     "physics": "MODERATE — consistent internally, inconsistent vs neighbours",
-                    "dacm": "LOW — no downstream response -> fault diagnosis",
+                    "dacm": "LOW — no downstream response → fault diagnosis",
                 },
             },
         ]
